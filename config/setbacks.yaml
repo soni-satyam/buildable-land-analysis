@@ -1,0 +1,61 @@
+# Configurable setback / buffer distances per constraint layer.
+# These are documented as SCREENING ASSUMPTIONS, not universal legal
+# setback requirements. Change any value here (or override per-request)
+# without touching code.
+
+paths:
+  parcels:
+    file: "data/parcels/stratmap25-landparcels_48201_harris_202508.gdb"
+    layer: "stratmap25_landparcels_48201_harris_202508"
+    id_field: "Prop_ID"          # application-facing parcel identifier
+    source_crs: "EPSG:4326"
+
+  wetlands:
+    file: "data/wetlands/harris_wetlands.gpkg"
+    layer: "harris_wetlands"
+    source_crs: "EPSG:5070"
+
+  fema:
+    file: "data/fema/harris_fema_flood_hazards.gpkg"   # cleaned/repaired, not the raw ZIP
+    layer: "flood_hazard_areas"
+    source_crs: "EPSG:4269"
+
+  buildings:
+    file: "data/buildings/LiDAR_Building_Footprints_2018.gdb"
+    layer: "LiDAR_Building_Footprints_2018"
+    source_crs: "EPSG:2278"
+
+  transmission:
+    file: "data/transmission/harris_transmission_lines.gpkg"
+    layer: "harris_transmission_lines"
+    source_crs: "EPSG:3857"
+
+  county_boundary:
+    file: "data/counties/tl_2025_us_county.zip"
+    fips_field: "GEOID"
+    fips_value: "48201"
+    source_crs: "EPSG:4269"
+
+setbacks:
+  wetlands:
+    buffer_ft: 50
+    source: "Screening default; not a codified Texas/Harris County wetland buffer. Configurable."
+
+  fema:
+    exclude_sfha: true          # whether SFHA_TF == 'T' zones are treated as exclusions at all
+    buffer_ft: 0                # no additional buffer beyond the mapped flood hazard polygon
+    source: "FEMA NFHL SFHA flag (SFHA_TF == 'T'); Zone X not treated as high-risk exclusion."
+
+  buildings:
+    buffer_ft: 50
+    source: "Screening default setback around 2018 LiDAR footprints; not a local building-code setback."
+
+  transmission:
+    buffer_ft: 100
+    source: "Screening default; actual utility easement widths vary by voltage/owner. Configurable."
+
+# CRS used for all area math and buffering. Chosen as a proper Texas
+# state-plane projection (feet-based, matches the buildings source CRS,
+# accurate at county scale) rather than Web Mercator (EPSG:3857), which
+# distorts area and gets worse away from the equator.
+area_crs: "EPSG:2278"   # NAD83 / Texas South Central (ftUS)
