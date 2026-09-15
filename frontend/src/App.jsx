@@ -7,6 +7,7 @@ export default function App() {
   const [parcelId, setParcelId] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
   const [settings, setSettings] = useState({
     wetland_buffer_ft: 50,
     building_setback_ft: 50,
@@ -17,109 +18,170 @@ export default function App() {
   async function analyze(extra = {}) {
     if (!parcelId) return;
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch(`${API_BASE}/api/analyze`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ parcel_id: parcelId, ...settings, ...extra }),
       });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${res.status})`);
+      }
       const data = await res.json();
       setResult(data);
+    } catch (e) {
+      setError(e.message);
     } finally {
       setLoading(false);
     }
   }
 
   function handleAdjustment(adjustment) {
-    // adjustment: { user_exclusions: [...] } or { user_restores: [...] }
     analyze(adjustment);
   }
 
+  function updateSetting(key, value) {
+    setSettings((s) => ({ ...s, [key]: value }));
+  }
+
   return (
-    <div style={{ display: "flex", height: "100vh" }}>
-      <div style={{ flex: 1 }}>
-        <MapView result={result} onAdjustment={handleAdjustment} />
-      </div>
-      <aside style={{ width: 340, padding: 16, borderLeft: "1px solid #ddd", overflowY: "auto" }}>
-        <h2>Buildable Land Analysis</h2>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <p className="eyebrow">HARRIS COUNTY, TX — FIPS 48201</p>
+          <h1>Buildable Land Analysis</h1>
+          <p>Estimated buildable area, screened against wetlands, flood hazard, structures, and transmission easements.</p>
+        </div>
 
-        <label style={{ display: "block", marginBottom: 8 }}>
-          Prop_ID
-          <input
-            value={parcelId}
-            onChange={(e) => setParcelId(e.target.value)}
-            placeholder="e.g. 0660640000012"
-            style={{ width: "100%" }}
-          />
-        </label>
-
-        <fieldset style={{ marginBottom: 12 }}>
-          <legend>Setbacks (screening assumptions)</legend>
-          <label style={{ display: "block" }}>
-            Wetland buffer (ft)
+        <div className="section">
+          <p className="section-title">PARCEL</p>
+          <div className="field">
+            <label htmlFor="parcel-id">Prop_ID</label>
             <input
-              type="number"
+              id="parcel-id"
+              type="text"
+              value={parcelId}
+              onChange={(e) => setParcelId(e.target.value)}
+              placeholder="e.g. 0660640000012"
+              onKeyDown={(e) => e.key === "Enter" && analyze()}
+            />
+          </div>
+          <button className="btn-primary" onClick={() => analyze()} disabled={!parcelId || loading}>
+            {loading ? "Calculating…" : "Analyze parcel"}
+          </button>
+          {error && (
+            <p style={{ color: "#b95d40", fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>{error}</p>
+          )}
+        </div>
+
+        <div className="section">
+          <p className="section-title">SETBACKS — SCREENING ASSUMPTIONS</p>
+
+          <div className="setback-row">
+            <div className="setback-row-head">
+              <span>Wetland buffer</span>
+              <span className="setback-value">{settings.wetland_buffer_ft} ft</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="300"
+              step="5"
               value={settings.wetland_buffer_ft}
-              onChange={(e) => setSettings((s) => ({ ...s, wetland_buffer_ft: Number(e.target.value) }))}
+              onChange={(e) => updateSetting("wetland_buffer_ft", Number(e.target.value))}
             />
-          </label>
-          <label style={{ display: "block" }}>
-            Building setback (ft)
+          </div>
+
+          <div className="setback-row">
+            <div className="setback-row-head">
+              <span>Building setback</span>
+              <span className="setback-value">{settings.building_setback_ft} ft</span>
+            </div>
             <input
-              type="number"
+              type="range"
+              min="0"
+              max="300"
+              step="5"
               value={settings.building_setback_ft}
-              onChange={(e) => setSettings((s) => ({ ...s, building_setback_ft: Number(e.target.value) }))}
+              onChange={(e) => updateSetting("building_setback_ft", Number(e.target.value))}
             />
-          </label>
-          <label style={{ display: "block" }}>
-            Transmission buffer (ft)
+          </div>
+
+          <div className="setback-row">
+            <div className="setback-row-head">
+              <span>Transmission buffer</span>
+              <span className="setback-value">{settings.transmission_buffer_ft} ft</span>
+            </div>
             <input
-              type="number"
+              type="range"
+              min="0"
+              max="400"
+              step="10"
               value={settings.transmission_buffer_ft}
-              onChange={(e) => setSettings((s) => ({ ...s, transmission_buffer_ft: Number(e.target.value) }))}
+              onChange={(e) => updateSetting("transmission_buffer_ft", Number(e.target.value))}
             />
-          </label>
-          <label style={{ display: "block" }}>
+          </div>
+
+          <label className="checkbox-row">
             <input
               type="checkbox"
               checked={settings.exclude_sfha}
-              onChange={(e) => setSettings((s) => ({ ...s, exclude_sfha: e.target.checked }))}
+              onChange={(e) => updateSetting("exclude_sfha", e.target.checked)}
             />
             Exclude FEMA Special Flood Hazard Areas
           </label>
-        </fieldset>
-
-        <button onClick={() => analyze()} disabled={!parcelId || loading}>
-          {loading ? "Calculating…" : "Analyze parcel"}
-        </button>
+        </div>
 
         {result && (
-          <>
-            <p style={{ marginTop: 16 }}>
-              <strong>Parcel:</strong> {result.parcel_acres} acres
-            </p>
-            <p>
-              <strong>Excluded (union of all constraints):</strong> {result.excluded_acres} acres
-            </p>
-            <p>
-              <strong>Buildable:</strong> {result.buildable_acres} acres
-            </p>
-            <h3>Breakdown by constraint</h3>
-            <p style={{ fontSize: 12, color: "#666" }}>
+          <div className="section">
+            <p className="section-title">RESULT</p>
+            <div className="stat-grid">
+              <div className="stat">
+                <p className="stat-label">PARCEL</p>
+                <p className="stat-value">{result.parcel_acres}<span className="stat-unit">ac</span></p>
+              </div>
+              <div className="stat">
+                <p className="stat-label">EXCLUDED</p>
+                <p className="stat-value">{result.excluded_acres}<span className="stat-unit">ac</span></p>
+              </div>
+              <div className="stat stat-wide">
+                <p className="stat-label">ESTIMATED BUILDABLE</p>
+                <p className="stat-value">{result.buildable_acres}<span className="stat-unit">ac</span></p>
+              </div>
+            </div>
+
+            <p className="section-title">BREAKDOWN BY CONSTRAINT</p>
+            <p className="breakdown-note">
               Individual values may overlap — they will not sum exactly to the excluded total above.
             </p>
-            <ul>
-              {result.breakdown.map((b, i) => (
-                <li key={i}>
-                  {b.layer}: -{b.acres_removed} ac {b.buffer_ft ? `(${b.buffer_ft} ft buffer)` : ""}
-                </li>
-              ))}
-            </ul>
-            <p style={{ fontSize: 12, color: "#666", marginTop: 12 }}>{result.note}</p>
-          </>
+            <table className="breakdown-table">
+              <tbody>
+                {result.breakdown.map((b, i) => (
+                  <tr key={i}>
+                    <td>
+                      {b.layer.replace(/_/g, " ")}
+                      {b.buffer_ft ? <span className="breakdown-buffer">+{b.buffer_ft}ft</span> : null}
+                    </td>
+                    <td>-{b.acres_removed} ac</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <p className="disclosure">{result.note}</p>
+          </div>
         )}
-        {!result && !loading && <p>Enter a Prop_ID and click Analyze.</p>}
+
+        {!result && !loading && !error && (
+          <div className="section">
+            <p className="empty-state">Enter a Prop_ID and click Analyze to see the buildable area breakdown and map.</p>
+          </div>
+        )}
       </aside>
+
+      <MapView result={result} onAdjustment={handleAdjustment} />
     </div>
   );
 }

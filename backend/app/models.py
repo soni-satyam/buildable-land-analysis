@@ -73,5 +73,6 @@ class AnalyzeResponse(BaseModel):
     buildable_acres: float
 
     breakdown: list[BreakdownItem]
+    note: str
 
     geometry: dict

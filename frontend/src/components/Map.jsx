@@ -1,11 +1,27 @@
 import React, { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
-import MapboxDraw from "@mapbox/mapbox-gl-draw";
+import { TerraDraw, TerraDrawPolygonMode, TerraDrawSelectMode } from "terra-draw";
+import { TerraDrawMapLibreGLAdapter } from "terra-draw-maplibre-gl-adapter";
 import "maplibre-gl/dist/maplibre-gl.css";
-import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 
-// TODO: point at your own basemap style or a free vector tile source
-const MAP_STYLE = "https://demotiles.maplibre.org/style.json";
+// A plain raster OSM basemap defined inline, rather than pointing at an
+// external full vector style (fonts/glyphs/sprite). A vector style needs
+// several extra assets to load successfully; a raster XYZ source only
+// needs the tile images themselves, so it degrades far more gracefully on
+// a restricted or slow network and is a common reason a map silently
+// fails to render at all.
+const BASEMAP_STYLE = {
+  version: 8,
+  sources: {
+    osm: {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "&copy; OpenStreetMap contributors",
+    },
+  },
+  layers: [{ id: "osm", type: "raster", source: "osm" }],
+};
 
 // Centered roughly on Harris County, TX (per the data handoff spec's extent)
 const HARRIS_COUNTY_CENTER = [-95.43, 29.83];
@@ -19,57 +35,72 @@ export default function MapView({ result, onAdjustment }) {
   const [drawMode, setDrawMode] = useState("exclude"); // "exclude" | "restore"
   const drawModeRef = useRef(drawMode);
   drawModeRef.current = drawMode;
+  const [mapError, setMapError] = useState(null);
 
   useEffect(() => {
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: MAP_STYLE,
-      center: HARRIS_COUNTY_CENTER,
-      zoom: 15,
-    });
-    mapRef.current = map;
-
-    const draw = new MapboxDraw({
-      displayControlsDefault: false,
-      controls: { polygon: true, trash: true },
-    });
-    map.addControl(draw);
-    drawRef.current = draw;
-
-    function handleDraw(e) {
-      const feature = e.features[0];
-
-      if (!feature || feature.geometry?.type !== "Polygon") {
-        return;
-      }
-
-      const adjustment = {
-        kind: drawModeRef.current,
-        geometry: feature.geometry,
-      };
-
-      if (drawModeRef.current === "restore") {
-        drawnRestoresRef.current = [
-          ...drawnRestoresRef.current,
-          adjustment,
-        ];
-      } else {
-        drawnExclusionsRef.current = [
-          ...drawnExclusionsRef.current,
-          adjustment,
-        ];
-      }
-
-      onAdjustment({
-        user_exclusions: drawnExclusionsRef.current,
-        user_restores: drawnRestoresRef.current,
+    let map;
+    try {
+      map = new maplibregl.Map({
+        container: containerRef.current,
+        style: BASEMAP_STYLE,
+        center: HARRIS_COUNTY_CENTER,
+        zoom: 15,
       });
+      mapRef.current = map;
+    } catch (e) {
+      console.error("Map failed to initialize:", e);
+      setMapError(e.message || "Map failed to initialize.");
+      return;
     }
 
-    map.on("draw.create", handleDraw);
-    map.on("draw.update", handleDraw);
+    map.on("error", (e) => {
+      // MapLibre reports async failures (bad tile URLs, style errors, etc.)
+      // through this event rather than throwing - log so they're visible.
+      console.error("MapLibre error:", e?.error || e);
+    });
 
-    return () => map.remove();
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    map.on("load", () => {
+      try {
+        const draw = new TerraDraw({
+          adapter: new TerraDrawMapLibreGLAdapter({ map, lib: maplibregl }),
+          modes: [new TerraDrawPolygonMode(), new TerraDrawSelectMode()],
+        });
+        draw.start();
+        draw.setMode("polygon");
+        drawRef.current = draw;
+
+        draw.on("finish", (id) => {
+          const snapshot = draw.getSnapshot();
+          const feature = snapshot.find((f) => f.id === id);
+          if (!feature || feature.geometry.type !== "Polygon") return;
+
+          const adjustment = { kind: drawModeRef.current, geometry: feature.geometry };
+          if (drawModeRef.current === "restore") {
+            drawnRestoresRef.current = [...drawnRestoresRef.current, adjustment];
+          } else {
+            drawnExclusionsRef.current = [...drawnExclusionsRef.current, adjustment];
+          }
+
+          onAdjustment({
+            user_exclusions: drawnExclusionsRef.current,
+            user_restores: drawnRestoresRef.current,
+          });
+
+          // Stay in drawing mode so the next shape can be drawn immediately.
+          draw.setMode("polygon");
+        });
+      } catch (e) {
+        console.error("Draw tool failed to initialize:", e);
+        setMapError("Map loaded, but the draw tool failed to initialize: " + e.message);
+      }
+    });
+
+    return () => {
+      drawRef.current?.stop();
+      map.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -97,18 +128,21 @@ export default function MapView({ result, onAdjustment }) {
       }
     };
 
-    // Draw order matters: parcel outline first, then excluded (red), then
-    // buildable (green) on top so overlaps read clearly.
-    addOrUpdateFill("parcel", result.geometry.parcel, "#3498db");
-    addOrUpdateFill("excluded", result.geometry.excluded, "#e74c3c");
-    addOrUpdateFill("buildable", result.geometry.buildable, "#2ecc71");
+    const render = () => {
+      addOrUpdateFill("parcel", result.geometry.parcel, "#3498db");
+      addOrUpdateFill("excluded", result.geometry.excluded, "#b95d40");
+      addOrUpdateFill("buildable", result.geometry.buildable, "#63a06f");
 
-    try {
-      const bbox = geometryBounds(result.geometry.parcel);
-      if (bbox) map.fitBounds(bbox, { padding: 40, duration: 500 });
-    } catch (_) {
-      /* ignore fit errors on odd geometries */
-    }
+      try {
+        const bbox = geometryBounds(result.geometry.parcel);
+        if (bbox) map.fitBounds(bbox, { padding: 40, duration: 500 });
+      } catch (_) {
+        /* ignore fit errors on odd geometries */
+      }
+    };
+
+    if (map.isStyleLoaded()) render();
+    else map.once("load", render);
   }, [result]);
 
   function geometryBounds(geometry) {
@@ -128,19 +162,9 @@ export default function MapView({ result, onAdjustment }) {
   }
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      <div
-        style={{
-          position: "absolute",
-          zIndex: 1,
-          top: 10,
-          left: 10,
-          background: "white",
-          padding: 8,
-          borderRadius: 4,
-        }}
-      >
-        <label style={{ marginRight: 8 }}>
+    <div className="map-area">
+      <div className="draw-toggle">
+        <label className={drawMode === "exclude" ? "active" : ""}>
           <input
             type="radio"
             checked={drawMode === "exclude"}
@@ -148,7 +172,7 @@ export default function MapView({ result, onAdjustment }) {
           />
           Draw: Exclude
         </label>
-        <label>
+        <label className={drawMode === "restore" ? "active" : ""}>
           <input
             type="radio"
             checked={drawMode === "restore"}
@@ -157,6 +181,30 @@ export default function MapView({ result, onAdjustment }) {
           Draw: Restore
         </label>
       </div>
+
+      {result && (
+        <div className="legend">
+          <div className="legend-item">
+            <span className="legend-swatch" style={{ background: "#3498db" }} />
+            Parcel boundary
+          </div>
+          <div className="legend-item">
+            <span className="legend-swatch" style={{ background: "#63a06f" }} />
+            Buildable
+          </div>
+          <div className="legend-item">
+            <span className="legend-swatch" style={{ background: "#b95d40" }} />
+            Excluded
+          </div>
+        </div>
+      )}
+
+      {mapError && (
+        <div className="map-error-banner">
+          {mapError}
+        </div>
+      )}
+
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
     </div>
   );

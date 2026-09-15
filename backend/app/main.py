@@ -6,7 +6,7 @@ from pyproj import CRS, Transformer
 from shapely.ops import transform
 
 from app.config import load_setback_config
-from app.data_loader import load_parcel, load_constraint_layers_near
+from app.data_loader import load_parcel, load_constraint_layers_near, DataNotAvailableError
 from app.geometry import compute_buildable_area
 from app.models import AnalyzeRequest, AnalyzeResponse, BreakdownItem, GeoJSONGeometry
 
@@ -70,6 +70,8 @@ def get_parcel(parcel_id: str):
         gdf = load_parcel(parcel_id, CONFIG)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except DataNotAvailableError as e:
+        raise HTTPException(503, str(e))
     geom = gdf.geometry.iloc[0]
     if geom is None or geom.is_empty:
         raise HTTPException(422, "Parcel geometry is empty")
@@ -84,6 +86,8 @@ def analyze(req: AnalyzeRequest):
         parcel_gdf = load_parcel(req.parcel_id, CONFIG)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except DataNotAvailableError as e:
+        raise HTTPException(503, str(e))
 
     geom = parcel_gdf.geometry.iloc[0]
     if geom is None or geom.is_empty:

@@ -10,11 +10,19 @@ Performance:
 from pathlib import Path
 
 import geopandas as gpd
+from pyogrio.errors import DataSourceError
 from pyproj import Transformer
 from shapely.geometry import box
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+class DataNotAvailableError(Exception):
+    """Raised when a configured GIS source file is missing or unreadable.
+    Kept distinct from ValueError (used for "parcel not found") so main.py
+    can return a 503 instead of a 404 - the difference between "that parcel
+    doesn't exist" and "the dataset itself isn't set up yet"."""
 
 
 def _resolve(path_str: str) -> Path:
@@ -42,12 +50,21 @@ def load_parcel(
 
     where = f"{id_field} = '{safe_id}'"
 
-    gdf = gpd.read_file(
-        path,
-        layer=cfg.get("layer"),
-        where=where,
-        engine="pyogrio",
-    )
+    if not path.exists():
+        raise DataNotAvailableError(
+            f"Parcels dataset not found at {path}. "
+            f"Make sure it's been downloaded and placed per config/setbacks.yaml."
+        )
+
+    try:
+        gdf = gpd.read_file(
+            path,
+            layer=cfg.get("layer"),
+            where=where,
+            engine="pyogrio",
+        )
+    except DataSourceError as e:
+        raise DataNotAvailableError(f"Could not read parcels dataset at {path}: {e}") from e
 
     if gdf.empty:
         raise ValueError(
@@ -143,12 +160,18 @@ def _load_layer_near(
         source_crs,
     )
 
-    gdf = gpd.read_file(
-        path,
-        layer=cfg.get("layer"),
-        bbox=query_bbox,
-        engine="pyogrio",
-    )
+    try:
+        gdf = gpd.read_file(
+            path,
+            layer=cfg.get("layer"),
+            bbox=query_bbox,
+            engine="pyogrio",
+        )
+    except DataSourceError:
+        # A constraint layer being unreadable shouldn't take down the whole
+        # analysis - treat it as "no constraint data available" rather than
+        # a hard failure, since parcels/wetlands are the only required inputs.
+        return gpd.GeoDataFrame(geometry=[], crs=source_crs)
 
     if gdf.crs is None:
         gdf = gdf.set_crs(
