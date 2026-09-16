@@ -144,12 +144,28 @@ def get_parcels_in_viewport(
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
-    try:
-        parcel_gdf = load_parcel(req.parcel_id, CONFIG)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    except DataNotAvailableError as e:
-        raise HTTPException(503, str(e))
+    if not req.parcel_id and not req.custom_geometry:
+        raise HTTPException(400, "Provide either parcel_id or custom_geometry")
+
+    selection_label = None
+    if req.parcel_id:
+        try:
+            parcel_gdf = load_parcel(req.parcel_id, CONFIG)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        except DataNotAvailableError as e:
+            raise HTTPException(503, str(e))
+        selection_label = req.parcel_id
+    else:
+        # Freehand area drawn by the user on the map - no Prop_ID exists
+        # for it, so it's built directly from the submitted GeoJSON
+        # (EPSG:4326, as MapLibre/GeoJSON always is) rather than looked up.
+        drawn_geom = shape(req.custom_geometry.dict())
+        if not drawn_geom.is_valid:
+            drawn_geom = drawn_geom.make_valid()
+        if drawn_geom.is_empty:
+            raise HTTPException(422, "Drawn area geometry is empty")
+        parcel_gdf = gpd.GeoDataFrame(geometry=[drawn_geom], crs="EPSG:4326")
 
     geom = parcel_gdf.geometry.iloc[0]
     if geom is None or geom.is_empty:
@@ -270,6 +286,7 @@ def analyze(req: AnalyzeRequest):
         excluded_acres,
         buildable_geom,
         excluded_geom,
+        restored_acres,
     ) = compute_buildable_area(
         parcel_gdf,
         constraint_layers,
@@ -300,11 +317,12 @@ def analyze(req: AnalyzeRequest):
             layers_wgs84[b.layer] = mapping(g)
 
     return AnalyzeResponse(
-        parcel_id=req.parcel_id,
+        parcel_id=selection_label,
         parcel_acres=round(parcel_acres, 2),
         excluded_acres=round(excluded_acres, 2),
         buildable_acres_raw=round(buildable_acres_raw, 4),
         buildable_acres=round(buildable_acres_raw, 2),
+        restored_acres=round(restored_acres, 4),
         breakdown=[
             BreakdownItem(layer=b.layer, acres_removed=b.acres_removed, buffer_ft=b.buffer_ft, reason=b.reason)
             for b in breakdown

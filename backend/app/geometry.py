@@ -30,6 +30,7 @@ class LayerResult:
     acres_removed: float
     buffer_ft: float
     reason: str
+    geometry: base.BaseGeometry | None = None
 
 
 def _area_acres(geom, crs_units_are_feet: bool) -> float:
@@ -207,7 +208,8 @@ def compute_buildable_area(
                 layer="wetlands",
                 acres_removed=round(acres, 2),
                 buffer_ft=buffer_ft,
-                reason="NWI-mapped wetland screening area + buffer",
+                reason="Wetland buffer",
+                geometry=clipped
             )
         )
 
@@ -252,10 +254,8 @@ def compute_buildable_area(
                     layer="fema_flood",
                     acres_removed=round(acres, 2),
                     buffer_ft=0,
-                    reason=(
-                        "FEMA NFHL Special Flood Hazard Area "
-                        "(screening exclusion)"
-                    ),
+                    reason= "Flood zone",
+                    geometry=clipped
                 )
             )
 
@@ -299,10 +299,8 @@ def compute_buildable_area(
                 layer="buildings",
                 acres_removed=round(acres, 2),
                 buffer_ft=buffer_ft,
-                reason=(
-                    "2018 LiDAR building footprint + "
-                    "screening setback"
-                ),
+                reason="Building setback",
+                geometry=clipped
             )
         )
 
@@ -346,10 +344,8 @@ def compute_buildable_area(
                 layer="transmission",
                 acres_removed=round(acres, 2),
                 buffer_ft=buffer_ft,
-                reason=(
-                    "HIFLD transmission line "
-                    "screening buffer"
-                ),
+                reason="Power line buffer",
+                geometry=clipped
             )
         )
 
@@ -386,7 +382,8 @@ def compute_buildable_area(
                 layer="manual_exclude",
                 acres_removed=round(acres, 2),
                 buffer_ft=0,
-                reason="User-drawn exclusion",
+                reason="Manually excluded",
+                geometry=clipped
             )
         )
 
@@ -407,6 +404,10 @@ def compute_buildable_area(
         all_exclusion_parts
     )
 
+    excluded_acres_before_restore = _area_acres(
+        excluded_geom,
+        crs_units_are_feet,
+    )
     # ---------------------------------------------------------
     # Manual restores
     # ---------------------------------------------------------
@@ -475,6 +476,15 @@ def compute_buildable_area(
         excluded_acres,
     )
 
+    # How much area the user's manual restores actually clawed back from
+    # the data-driven + manual exclusions. Surfaced separately so the UI
+    # can flag it as an override the user should double check, rather than
+    # quietly folding it into "buildable" with no distinction.
+    restored_acres = max(
+        0.0,
+        excluded_acres_before_restore - excluded_acres,
+    )
+
     return (
         parcel_acres,
         buildable_acres_raw,
@@ -482,4 +492,7 @@ def compute_buildable_area(
         excluded_acres,
         buildable_geom,
         excluded_geom,
+        restored_acres,
     )
+    
+    

@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef } from "react";
 import MapView from "./components/Map.jsx";
+import { LAYER_COLORS, LAYER_LABELS } from "./layerColors.js";
 
 const API_BASE = "http://localhost:8000";
 
@@ -14,7 +15,6 @@ const LAYER_TOGGLES = [
 ];
 
 export default function App() {
-  const [selectedParcelId, setSelectedParcelId] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -23,21 +23,24 @@ export default function App() {
     building_setback_ft: 50,
     transmission_buffer_ft: 100,
     exclude_sfha: true,
+    restore_brush_ft: 60,
   });
   const [layerVisibility, setLayerVisibility] = useState(
     Object.fromEntries(LAYER_TOGGLES.map((l) => [l.id, true]))
   );
+  const selectionRef = useRef(null);
 
-  const analyze = useCallback(
-    async (parcelId, extra = {}) => {
-      if (!parcelId) return;
+  const runAnalyze = useCallback(
+    async (extra = {}) => {
+      const selection = selectionRef.current;
+      if (!selection) return;
       setLoading(true);
       setError(null);
       try {
         const res = await fetch(`${API_BASE}/api/analyze`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ parcel_id: parcelId, ...settings, ...extra }),
+          body: JSON.stringify({ ...selection, ...settings, ...extra }),
         });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
@@ -54,21 +57,28 @@ export default function App() {
     [settings]
   );
 
-  function handleParcelSelect(parcelId) {
-    setSelectedParcelId(parcelId);
-    analyze(parcelId);
+  function handleAreaSelected(geometry) {
+    selectionRef.current = { custom_geometry: geometry };    runAnalyze();
   }
 
+  // Called by MapView on every subsequent exclude/restore draw, with the
+  // full accumulated arrays so far.
   function handleAdjustment(adjustment) {
-    if (!selectedParcelId) return;
-    analyze(selectedParcelId, adjustment);
+    if (!selectionRef.current) return;
+    runAnalyze(adjustment);
+  }
+
+  function startNewSelection() {
+    selectionRef.current = null;
+    setResult(null);
+    setError(null);
   }
 
   const analyzeTimerRef = useRef(null);
 
   function updateSetting(key, value) {
     setSettings((s) => ({ ...s, [key]: value }));
-    if (!selectedParcelId) return;
+    if (!selectionRef.current) return;
     // Debounced: range sliders fire onChange continuously while dragging,
     // so wait for a short pause before re-running the analysis. Pass the
     // new value explicitly as an override rather than relying on `settings`
@@ -76,7 +86,7 @@ export default function App() {
     // sending a stale request.
     clearTimeout(analyzeTimerRef.current);
     analyzeTimerRef.current = setTimeout(() => {
-      analyze(selectedParcelId, { [key]: value });
+      runAnalyze({ [key]: value });
     }, 300);
   }
 
@@ -94,15 +104,25 @@ export default function App() {
         </div>
 
         <div className="section">
-          <p className="section-title">SELECTED PARCEL</p>
-          {selectedParcelId ? (
-            <p className="empty-state">
-              Prop_ID <strong style={{ color: "var(--brass)" }}>{selectedParcelId}</strong>
-              {loading ? " — calculating…" : ""}
-            </p>
+          <p className="section-title">SELECTED AREA</p>
+          {result ? (
+            <>
+              <p className="empty-state">
+                {result.parcel_id ? (
+                  <>Prop_ID <strong style={{ color: "var(--brass)" }}>{result.parcel_id}</strong></>
+                ) : (
+                  "Custom drawn area"
+                )}
+                {loading ? " — recalculating…" : ""}
+              </p>
+              <button type="button" className="new-selection-link" onClick={startNewSelection}>
+                ← New selection
+              </button>
+            </>
+
           ) : (
             <p className="empty-state">
-              Search for a location, zoom in, and click a parcel on the map to analyze it.
+              Click points on the map to draw an area, then click "Calculate Buildable Area" on the shape.
             </p>
           )}
           {error && <p style={{ color: "#b95d40", fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>{error}</p>}
@@ -164,6 +184,22 @@ export default function App() {
             />
             Exclude FEMA Special Flood Hazard Areas
           </label>
+
+          <div className="setback-row">
+            <div className="setback-row-head">
+              <span>Restore brush radius</span>
+              <span className="setback-value">{settings.restore_brush_ft} ft</span>
+            </div>
+            <input
+              type="range"
+              min="10"
+              max="200"
+              step="10"
+              value={settings.restore_brush_ft}
+              onChange={(e) => setSettings((s) => ({ ...s, restore_brush_ft: Number(e.target.value) }))}
+            />
+            <p className="field-hint">Right-click excluded (red) land on the map to mark this much of it buildable again.</p>
+          </div>
         </div>
 
         <div className="section">
@@ -171,6 +207,7 @@ export default function App() {
           {LAYER_TOGGLES.map((l) => (
             <label className="checkbox-row" key={l.id}>
               <input type="checkbox" checked={layerVisibility[l.id]} onChange={() => toggleLayer(l.id)} />
+              <span className="legend-swatch" style={{ background: LAYER_COLORS[l.id] }} />
               {l.label}
             </label>
           ))}
@@ -181,7 +218,7 @@ export default function App() {
             <p className="section-title">RESULT</p>
             <div className="stat-grid">
               <div className="stat">
-                <p className="stat-label">PARCEL</p>
+                 <p className="stat-label">SELECTED</p>
                 <p className="stat-value">{result.parcel_acres}<span className="stat-unit">ac</span></p>
               </div>
               <div className="stat">
@@ -194,6 +231,13 @@ export default function App() {
               </div>
             </div>
 
+            {result.restored_acres > 0 && (
+            <div className="restore-caution">
+                <p><strong>{result.restored_acres.toFixed(2)} ac</strong> manually marked buildable by you.</p>
+                <p className="restore-caution-warning">⚠ Double-check this override before relying on it.</p>
+              </div>
+            )}
+
             <p className="section-title">BREAKDOWN BY CONSTRAINT</p>
             <p className="breakdown-note">
               Individual values may overlap — they will not sum exactly to the excluded total above.
@@ -203,8 +247,10 @@ export default function App() {
                 {result.breakdown.map((b, i) => (
                   <tr key={i}>
                     <td>
-                      {b.layer.replace(/_/g, " ")}
+                      <span className="legend-swatch" style={{ background: LAYER_COLORS[b.layer] || "#c99a46" }} />
+                      {LAYER_LABELS[b.layer] || b.layer.replace(/_/g, " ")}
                       {b.buffer_ft ? <span className="breakdown-buffer">+{b.buffer_ft}ft</span> : null}
+                      <div className="breakdown-reason">{b.reason}</div>
                     </td>
                     <td>-{b.acres_removed} ac</td>
                   </tr>
@@ -220,9 +266,11 @@ export default function App() {
       <MapView
         result={result}
         onAdjustment={handleAdjustment}
-        onParcelSelect={handleParcelSelect}
+        onAreaSelected={handleAreaSelected}
         layerVisibility={layerVisibility}
-      />
+        restoreBrushFt={settings.restore_brush_ft}
+       />
+
     </div>
   );
 }

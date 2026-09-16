@@ -41,7 +41,11 @@ class BuildableAreaResponse(BaseModel):
     excluded_geometry: GeoJSONGeometry
 
 class AnalyzeRequest(BaseModel):
-    parcel_id: str
+    # Either an existing parcel's Prop_ID, OR a freehand-drawn polygon
+    # (custom_geometry, in EPSG:4326) can be analyzed. Exactly one should
+    # be provided; main.py enforces that.
+    parcel_id: Optional[str] = None
+    custom_geometry: Optional[GeoJSONGeometry] = None
 
     wetland_buffer_ft: Optional[float] = None
     building_setback_ft: Optional[float] = None
@@ -65,22 +69,23 @@ class BreakdownItem(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    parcel_id: str
+    # None when the analyzed area was a freehand drawn polygon rather than
+    # a real parcel (no Prop_ID exists for it).
+    parcel_id: Optional[str] = None
 
     parcel_acres: float
     excluded_acres: float
     buildable_acres_raw: float
     buildable_acres: float
+    # Total acreage clawed back by the user's manual "restore" draws /
+    # right-click overrides. Surfaced separately (not silently folded into
+    # "buildable") so the UI can flag it for the user to double check.
+    restored_acres: float = 0.0
 
     breakdown: list[BreakdownItem]
     note: str
 
     geometry: dict
-    # Per-constraint union geometries (wetlands/fema_flood/buildings/
-    # transmission), in EPSG:4326, keyed by the same layer names used in
-    # `breakdown`. Only present for layers that had data and a nonzero
-    # exclusion. Lets the frontend render each as an independent,
-    # toggleable overlay instead of only the combined "excluded" shape.
     layers: dict = Field(default_factory=dict)
 
 

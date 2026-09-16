@@ -3,29 +3,17 @@ import maplibregl from "maplibre-gl";
 import { TerraDraw, TerraDrawPolygonMode, TerraDrawSelectMode } from "terra-draw";
 import { TerraDrawMapLibreGLAdapter } from "terra-draw-maplibre-gl-adapter";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { LAYER_COLORS, LAYER_LABELS } from "../layerColors.js";
 
 const API_BASE = "http://localhost:8000";
 
-// Harris County, TX extent (per the project's data handoff spec).
 const HARRIS_COUNTY_BOUNDS = [
   [-95.960733, 29.497297],
   [-94.908492, 30.170606],
 ];
 const HARRIS_COUNTY_CENTER = [-95.43, 29.83];
-
-// Below this zoom the viewport bbox is too large for the backend's parcel
-// cap (1,500 features) to give a meaningful picture, and would frequently
-// hit the backend's "viewport too large" guard. Prompt the user to zoom
-// in instead of silently failing.
 const MIN_PARCEL_ZOOM = 15;
 
-// Free, no-API-key raster basemaps. Each is a plain XYZ raster source, not
-// a full vector style - fewer moving parts (no glyphs/sprite to fetch),
-// and easy to swap without touching anything else on the map (see
-// setBasemap below - we add/remove just this one source+layer rather than
-// calling map.setStyle, which would tear down every overlay and the draw
-// tool along with it).
-const CARTO_API_KEY = import.meta.env.VITE_CARTO_API_KEY || "";
 const BASEMAPS = {
   streets: {
     label: "Streets",
@@ -34,19 +22,17 @@ const BASEMAPS = {
   },
   light: {
     label: "Light",
-    tiles: [`https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png?key=${CARTO_API_KEY}`],
+    tiles: [`https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png?key=${import.meta.env.VITE_CARTO_API_KEY || ""}`],
     attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
   },
   dark: {
     label: "Dark",
-    tiles: [`https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png?key=${CARTO_API_KEY}`],
+    tiles: [`https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png?key=${import.meta.env.VITE_CARTO_API_KEY || ""}`],
     attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
   },
   satellite: {
     label: "Satellite",
-    tiles: [
-      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    ],
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
     attribution: "Esri, Maxar, Earthstar Geographics",
   },
   terrain: {
@@ -60,52 +46,90 @@ const BASEMAPS = {
   },
 };
 
-// Layers whose visibility the sidebar's "Analysis Layers" control can
-// toggle, and which source they come from (per-request `layers` geometries
-// vs. the base `geometry` block that's always present on a result).
+// Which result-driven layers get rendered/toggled, and in what order
+// (later = drawn on top).
 const ANALYSIS_LAYER_IDS = ["parcel", "buildable", "excluded", "wetlands", "fema_flood", "buildings", "transmission"];
 
 const EMPTY_FEATURE = { type: "Feature", geometry: { type: "GeometryCollection", geometries: [] }, properties: {} };
+const EMPTY_FC = { type: "FeatureCollection", features: [] };
 
-export default function MapView({ result, onAdjustment, onParcelSelect, layerVisibility }) {
+// --- small geometry helpers (no turf dependency) ---
+
+// Area-weighted centroid of a simple polygon ring, for placing the
+// "Calculate Buildable Area" button roughly inside whatever shape was drawn.
+function polygonCentroid(geometry) {
+  const ring = geometry.coordinates[0];
+  let area = 0, cx = 0, cy = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x0, y0] = ring[i];
+    const [x1, y1] = ring[i + 1];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  area *= 0.5;
+  if (Math.abs(area) < 1e-12) return ring[0];
+  return [cx / (6 * area), cy / (6 * area)];
+}
+
+// A small circle polygon (in degrees lon/lat) centered on a right-click
+// point, used as the "restore brush" - a simple, reliable way to let the
+// user mark a bit of excluded land as buildable again without needing a
+// precise freehand right-click-drag capture.
+function makeCircle(lng, lat, radiusFt, steps = 32) {
+  const radiusM = radiusFt * 0.3048;
+  const latRad = (lat * Math.PI) / 180;
+  const dLat = radiusM / 111320;
+  const dLng = radiusM / (111320 * Math.cos(latRad));
+  const coords = [];
+  for (let i = 0; i <= steps; i++) {
+    const theta = (i / steps) * 2 * Math.PI;
+    coords.push([lng + dLng * Math.cos(theta), lat + dLat * Math.sin(theta)]);
+  }
+  coords.push(coords[0]);
+  return { type: "Polygon", coordinates: [coords] };
+}
+
+export default function MapView({ result, onAdjustment, onAreaSelected, layerVisibility, restoreBrushFt }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const drawRef = useRef(null);
+  const confirmMarkerRef = useRef(null);
   const drawnExclusionsRef = useRef([]);
   const drawnRestoresRef = useRef([]);
   const moveTimerRef = useRef(null);
+  const restoreTimerRef = useRef(null);
+
+  const hasResultRef = useRef(false);
+  useEffect(() => {
+    hasResultRef.current = !!result;
+  }, [result]);
+
+  const restoreBrushRef = useRef(restoreBrushFt || 60);
+  useEffect(() => {
+    restoreBrushRef.current = restoreBrushFt || 60;
+  }, [restoreBrushFt]);
 
   const [basemap, setBasemapKey] = useState("streets");
-  const [drawMode, setDrawMode] = useState("select"); // "select" | "exclude" | "restore"
-  const drawModeRef = useRef(drawMode);
-  drawModeRef.current = drawMode;
-
   const [mapError, setMapError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [zoomHint, setZoomHint] = useState(false);
-  const [parcelNote, setParcelNote] = useState(null);
+  const [hasPending, setHasPending] = useState(false);
 
-  // --- Basemap: swap only the raster source/layer in place, never the
-  // whole style, so overlays and the draw tool are never disturbed. ---
+  // --- Basemap: swap only the raster source/layer in place, so overlays
+  // and drawn shapes are never disturbed by a basemap change. ---
   const applyBasemap = useCallback((map, key) => {
     const def = BASEMAPS[key] || BASEMAPS.streets;
-
-    // Find the current bottom-most non-basemap layer so the new basemap
-    // layer gets reinserted below everything else, not on top.
     const existingLayers = map.getStyle()?.layers || [];
     const anchorLayer = existingLayers.find((l) => l.id !== "basemap");
 
     if (map.getLayer("basemap")) map.removeLayer("basemap");
     if (map.getSource("basemap")) map.removeSource("basemap");
 
-    map.addSource("basemap", {
-      type: "raster",
-      tiles: def.tiles,
-      tileSize: 256,
-      attribution: def.attribution,
-    });
+    map.addSource("basemap", { type: "raster", tiles: def.tiles, tileSize: 256, attribution: def.attribution });
     map.addLayer({ id: "basemap", type: "raster", source: "basemap" }, anchorLayer ? anchorLayer.id : undefined);
   }, []);
 
@@ -114,16 +138,14 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
     if (mapRef.current) applyBasemap(mapRef.current, key);
   }
 
-  // --- Search (Nominatim - free, no API key) ---
+  // --- Search (Nominatim) ---
   async function runSearch(e) {
     e.preventDefault();
     if (!searchQuery.trim()) return;
     setSearching(true);
     try {
-      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(searchQuery)}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      setSearchResults(data);
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(searchQuery)}`);
+      setSearchResults(await res.json());
     } catch (e) {
       console.error("Search failed:", e);
       setSearchResults([]);
@@ -136,13 +158,7 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
     const map = mapRef.current;
     if (!map) return;
     const [south, north, west, east] = r.boundingbox.map(Number);
-    map.fitBounds(
-      [
-        [west, south],
-        [east, north],
-      ],
-      { padding: 60, duration: 800, maxZoom: 17 }
-    );
+    map.fitBounds([[west, south], [east, north]], { padding: 60, duration: 800, maxZoom: 17 });
     setSearchResults([]);
     setSearchQuery(r.display_name);
   }
@@ -155,46 +171,67 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
     setSearchResults([]);
   }
 
-  // --- Parcels-in-viewport (bbox-filtered, never the full dataset) ---
+  // --- Parcels-in-viewport: shown only as passive reference context now
+  // (the primary selection method is drawing, not clicking a real parcel). ---
   const fetchParcelsInViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map) return;
-
     const zoom = map.getZoom();
     if (zoom < MIN_PARCEL_ZOOM) {
       setZoomHint(true);
-      setParcelNote(null);
       const src = map.getSource("parcels-view");
-      if (src) src.setData({ type: "FeatureCollection", features: [] });
+      if (src) src.setData(EMPTY_FC);
       return;
     }
     setZoomHint(false);
-
     const b = map.getBounds();
     const bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()].join(",");
-
     try {
       const res = await fetch(`${API_BASE}/api/parcels?bbox=${bbox}`);
-      if (!res.ok) {
-        setParcelNote(null);
-        return;
-      }
+      if (!res.ok) return;
       const data = await res.json();
-      setParcelNote(data.note);
-      const featureCollection = {
-        type: "FeatureCollection",
-        features: data.parcels.map((p) => ({
-          type: "Feature",
-          geometry: p.geometry,
-          properties: { parcel_id: p.parcel_id },
-        })),
-      };
       const src = map.getSource("parcels-view");
-      if (src) src.setData(featureCollection);
+      if (src) {
+        src.setData({
+          type: "FeatureCollection",
+          features: data.parcels.map((p) => ({ type: "Feature", geometry: p.geometry, properties: {} })),
+        });
+      }
     } catch (e) {
       console.error("Failed to load parcels in viewport:", e);
     }
   }, []);
+
+  // --- Clear every analysis-result layer back to empty (used on reset). ---
+  const clearAnalysisLayers = useCallback((map) => {
+    ANALYSIS_LAYER_IDS.forEach((id) => {
+      const src = map.getSource(id);
+      if (src) src.setData(EMPTY_FEATURE);
+    });
+  }, []);
+
+  function clearPendingSelection() {
+    const map = mapRef.current;
+    if (map?.getSource("pending-selection")) map.getSource("pending-selection").setData(EMPTY_FEATURE);
+    confirmMarkerRef.current?.remove();
+    confirmMarkerRef.current = null;
+    setHasPending(false);
+  }
+
+  function showConfirmButton(map, geometry) {
+    confirmMarkerRef.current?.remove();
+    const [lng, lat] = polygonCentroid(geometry);
+    const el = document.createElement("button");
+    el.className = "confirm-area-btn";
+    el.type = "button";
+    el.textContent = "Calculate Buildable Area";
+    el.onclick = (e) => {
+      e.stopPropagation();
+      onAreaSelected?.(geometry);
+      clearPendingSelection();
+    };
+    confirmMarkerRef.current = new maplibregl.Marker({ element: el, anchor: "bottom" }).setLngLat([lng, lat]).addTo(map);
+  }
 
   // --- Map init (runs once) ---
   useEffect(() => {
@@ -213,41 +250,21 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
       return;
     }
 
-    map.on("error", (e) => {
-      console.error("MapLibre error:", e?.error || e);
-    });
-
+    map.on("error", (e) => console.error("MapLibre error:", e?.error || e));
     map.addControl(new maplibregl.NavigationControl(), "top-right");
 
     map.on("load", () => {
       applyBasemap(map, "streets");
 
-      // Parcels-in-viewport layer (added once; data streamed in via setData)
-      map.addSource("parcels-view", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({
-        id: "parcels-view-fill",
-        type: "fill",
-        source: "parcels-view",
-        paint: { "fill-color": "#c99a46", "fill-opacity": 0.04 },
-      });
-      map.addLayer({
-        id: "parcels-view-outline",
-        type: "line",
-        source: "parcels-view",
-        paint: { "line-color": "#c99a46", "line-width": 1 },
-      });
+      // Passive reference layer: real parcel boundaries in view, for context only.
+      map.addSource("parcels-view", { type: "geojson", data: EMPTY_FC });
+      map.addLayer({ id: "parcels-view-fill", type: "fill", source: "parcels-view", paint: { "fill-color": "#8296a1", "fill-opacity": 0.03 } });
+      map.addLayer({ id: "parcels-view-outline", type: "line", source: "parcels-view", paint: { "line-color": "#8296a1", "line-width": 0.75 } });
 
-      map.on("mouseenter", "parcels-view-fill", () => {
-        if (drawModeRef.current === "select") map.getCanvas().style.cursor = "pointer";
-      });
-      map.on("mouseleave", "parcels-view-fill", () => {
-        map.getCanvas().style.cursor = "";
-      });
-      map.on("click", "parcels-view-fill", (e) => {
-        if (drawModeRef.current !== "select") return; // don't hijack clicks while drawing
-        const propId = e.features?.[0]?.properties?.parcel_id;
-        if (propId) onParcelSelect?.(propId);
-      });
+      // The user's drawn-but-not-yet-confirmed area.
+      map.addSource("pending-selection", { type: "geojson", data: EMPTY_FEATURE });
+      map.addLayer({ id: "pending-selection-fill", type: "fill", source: "pending-selection", paint: { "fill-color": "#c99a46", "fill-opacity": 0.15 } });
+      map.addLayer({ id: "pending-selection-outline", type: "line", source: "pending-selection", paint: { "line-color": "#c99a46", "line-width": 2, "line-dasharray": [2, 2] } });
 
       fetchParcelsInViewport();
       map.on("moveend", () => {
@@ -255,35 +272,47 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
         moveTimerRef.current = setTimeout(fetchParcelsInViewport, 250);
       });
 
-      // --- Draw tool (Terra Draw + its official MapLibre adapter) ---
+      // Right-click anywhere = paint a restore-brush circle. Only meaningful
+      // once there's a result to restore area *from*; the backend safely
+      // no-ops a restore that doesn't overlap anything excluded anyway.
+      map.on("contextmenu", (e) => {
+        if (!hasResultRef.current) return;
+        const circle = makeCircle(e.lngLat.lng, e.lngLat.lat, restoreBrushRef.current);
+        drawnRestoresRef.current = [...drawnRestoresRef.current, { kind: "restore", geometry: circle }];
+        clearTimeout(restoreTimerRef.current);
+        restoreTimerRef.current = setTimeout(() => {
+          onAdjustment({ user_exclusions: drawnExclusionsRef.current, user_restores: drawnRestoresRef.current });
+        }, 200);
+      });
+
+      // --- Draw tool: always ready to draw a polygon. The very first
+      // completed polygon becomes the pending "area of interest" (needs
+      // the confirm button); once a result exists, every subsequent
+      // polygon is treated as an additional exclude, applied immediately. ---
       try {
         const draw = new TerraDraw({
           adapter: new TerraDrawMapLibreGLAdapter({ map, lib: maplibregl }),
           modes: [new TerraDrawPolygonMode(), new TerraDrawSelectMode()],
         });
         draw.start();
-        draw.setMode("select"); // start in select mode so parcel clicks work immediately
+        draw.setMode("polygon");
         drawRef.current = draw;
 
         draw.on("finish", (id) => {
           const snapshot = draw.getSnapshot();
           const feature = snapshot.find((f) => f.id === id);
+          draw.removeFeatures([id]); // we render results ourselves; keep the draw layer empty
           if (!feature || feature.geometry.type !== "Polygon") return;
 
-          const adjustment = { kind: drawModeRef.current, geometry: feature.geometry };
-          if (drawModeRef.current === "restore") {
-            drawnRestoresRef.current = [...drawnRestoresRef.current, adjustment];
-          } else if (drawModeRef.current === "exclude") {
-            drawnExclusionsRef.current = [...drawnExclusionsRef.current, adjustment];
+          if (!hasResultRef.current) {
+            map.getSource("pending-selection").setData({ type: "Feature", geometry: feature.geometry, properties: {} });
+            setHasPending(true);
+            showConfirmButton(map, feature.geometry);
+          } else {
+            drawnExclusionsRef.current = [...drawnExclusionsRef.current, { kind: "exclude", geometry: feature.geometry }];
+            onAdjustment({ user_exclusions: drawnExclusionsRef.current, user_restores: drawnRestoresRef.current });
           }
-
-          onAdjustment({
-            user_exclusions: drawnExclusionsRef.current,
-            user_restores: drawnRestoresRef.current,
-          });
-
-          // Stay in the same drawing mode so the next shape can be drawn immediately.
-          if (drawModeRef.current !== "select") draw.setMode("polygon");
+          draw.setMode("polygon"); // stay ready for the next shape
         });
       } catch (e) {
         console.error("Draw tool failed to initialize:", e);
@@ -293,24 +322,18 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
 
     return () => {
       clearTimeout(moveTimerRef.current);
+      clearTimeout(restoreTimerRef.current);
       drawRef.current?.stop();
+      confirmMarkerRef.current?.remove();
       map.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keep Terra Draw's active mode in sync with the Select/Exclude/Restore toggle.
+  // --- Render (or clear) analysis-result geometries whenever the result changes ---
   useEffect(() => {
-    const draw = drawRef.current;
-    if (!draw) return;
-    draw.setMode(drawMode === "select" ? "select" : "polygon");
-  }, [drawMode]);
-
-  // --- Render analysis result geometries (parcel / buildable / excluded
-  // / per-constraint layers) whenever a new /api/analyze result arrives ---
-  useEffect(() => {
-    if (!result || !mapRef.current) return;
     const map = mapRef.current;
+    if (!map) return;
 
     const addOrUpdateFill = (id, geometry, color) => {
       const geojson = geometry ? { type: "Feature", geometry, properties: {} } : EMPTY_FEATURE;
@@ -324,14 +347,17 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
     };
 
     const render = () => {
-      addOrUpdateFill("parcel", result.geometry.parcel, "#3498db");
-      addOrUpdateFill("excluded", result.geometry.excluded, "#b95d40");
-      addOrUpdateFill("buildable", result.geometry.buildable, "#63a06f");
-
-      addOrUpdateFill("wetlands", result.layers?.wetlands, "#2f8f6e");
-      addOrUpdateFill("fema_flood", result.layers?.fema_flood, "#3b6fb0");
-      addOrUpdateFill("buildings", result.layers?.buildings, "#a2673a");
-      addOrUpdateFill("transmission", result.layers?.transmission, "#8a4fae");
+      if (!result) {
+        clearAnalysisLayers(map);
+        return;
+      }
+      addOrUpdateFill("parcel", result.geometry.parcel, LAYER_COLORS.parcel);
+      addOrUpdateFill("excluded", result.geometry.excluded, LAYER_COLORS.excluded);
+      addOrUpdateFill("buildable", result.geometry.buildable, LAYER_COLORS.buildable);
+      addOrUpdateFill("wetlands", result.layers?.wetlands, LAYER_COLORS.wetlands);
+      addOrUpdateFill("fema_flood", result.layers?.fema_flood, LAYER_COLORS.fema_flood);
+      addOrUpdateFill("buildings", result.layers?.buildings, LAYER_COLORS.buildings);
+      addOrUpdateFill("transmission", result.layers?.transmission, LAYER_COLORS.transmission);
 
       applyLayerVisibility(map, layerVisibility);
 
@@ -348,39 +374,47 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
 
-  // --- Apply layer-visibility toggles whenever the sidebar checkboxes change ---
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
-    if (map.isStyleLoaded()) applyLayerVisibility(map, layerVisibility);
+    if (map && map.isStyleLoaded()) applyLayerVisibility(map, layerVisibility);
   }, [layerVisibility]);
 
   function applyLayerVisibility(map, visibility) {
     ANALYSIS_LAYER_IDS.forEach((id) => {
-      const visible = visibility?.[id] !== false; // default visible
+      const visible = visibility?.[id] !== false;
       [id, `${id}-outline`].forEach((layerId) => {
-        if (map.getLayer(layerId)) {
-          map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
-        }
+        if (map.getLayer(layerId)) map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
       });
     });
   }
 
   function geometryBounds(geometry) {
     const coordsFlat = [];
-    const walk = (c) => {
-      if (typeof c[0] === "number") coordsFlat.push(c);
-      else c.forEach(walk);
-    };
+    const walk = (c) => (typeof c[0] === "number" ? coordsFlat.push(c) : c.forEach(walk));
     walk(geometry.coordinates);
     if (!coordsFlat.length) return null;
     const lons = coordsFlat.map((c) => c[0]);
     const lats = coordsFlat.map((c) => c[1]);
-    return [
-      [Math.min(...lons), Math.min(...lats)],
-      [Math.max(...lons), Math.max(...lats)],
-    ];
+    return [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
   }
+
+  // Reset callback exposed to the parent (via a ref-like pattern would be
+  // cleaner, but a simple prop-driven approach keeps this component self
+  // contained: App.jsx calls this indirectly by clearing `result`, and we
+  // react to that above; drawn-shape state is cleared here too).
+  useEffect(() => {
+    if (!result) {
+      drawnExclusionsRef.current = [];
+      drawnRestoresRef.current = [];
+      clearPendingSelection();
+      drawRef.current?.clear();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
+
+  const activeLayerKeys = result
+    ? ANALYSIS_LAYER_IDS.filter((id) => id === "parcel" || id === "buildable" || id === "excluded" || result.layers?.[id])
+    : [];
 
   return (
     <div className="map-area">
@@ -402,49 +436,35 @@ export default function MapView({ result, onAdjustment, onParcelSelect, layerVis
       {searchResults.length > 0 && (
         <div className="search-results">
           {searchResults.map((r, i) => (
-            <button key={i} onClick={() => flyToSearchResult(r)} type="button">
-              {r.display_name}
-            </button>
+            <button key={i} onClick={() => flyToSearchResult(r)} type="button">{r.display_name}</button>
           ))}
         </div>
       )}
 
       <div className="basemap-selector">
         {Object.entries(BASEMAPS).map(([key, def]) => (
-          <button
-            key={key}
-            className={basemap === key ? "active" : ""}
-            onClick={() => switchBasemap(key)}
-            type="button"
-          >
+          <button key={key} className={basemap === key ? "active" : ""} onClick={() => switchBasemap(key)} type="button">
             {def.label}
           </button>
         ))}
       </div>
 
-      <div className="draw-toggle">
-        <label className={drawMode === "select" ? "active" : ""}>
-          <input type="radio" checked={drawMode === "select"} onChange={() => setDrawMode("select")} />
-          Select parcel
-        </label>
-        <label className={drawMode === "exclude" ? "active" : ""}>
-          <input type="radio" checked={drawMode === "exclude"} onChange={() => setDrawMode("exclude")} />
-          Draw: Exclude
-        </label>
-        <label className={drawMode === "restore" ? "active" : ""}>
-          <input type="radio" checked={drawMode === "restore"} onChange={() => setDrawMode("restore")} />
-          Draw: Restore
-        </label>
+      <div className="draw-hint">
+        {!result && !hasPending && "Click points on the map to draw an area, then confirm it."}
+        {hasPending && "Click \"Calculate Buildable Area\" to analyze the drawn shape."}
+        {result && "Draw more to mark extra risk. Right-click excluded (red) land to mark it buildable."}
       </div>
 
-      {zoomHint && <div className="zoom-hint">Zoom in to see individual parcels</div>}
-      {!zoomHint && parcelNote && <div className="zoom-hint">{parcelNote}</div>}
+      {zoomHint && <div className="zoom-hint">Zoom in to see reference parcel boundaries</div>}
 
-      {result && (
+      {result && activeLayerKeys.length > 0 && (
         <div className="legend">
-          <div className="legend-item"><span className="legend-swatch" style={{ background: "#3498db" }} />Parcel</div>
-          <div className="legend-item"><span className="legend-swatch" style={{ background: "#63a06f" }} />Buildable</div>
-          <div className="legend-item"><span className="legend-swatch" style={{ background: "#b95d40" }} />Excluded</div>
+          {activeLayerKeys.map((id) => (
+            <div className="legend-item" key={id}>
+              <span className="legend-swatch" style={{ background: LAYER_COLORS[id] }} />
+              {LAYER_LABELS[id]}
+            </div>
+          ))}
         </div>
       )}
 
