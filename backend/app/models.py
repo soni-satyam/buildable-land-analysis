@@ -76,3 +76,21 @@ class AnalyzeResponse(BaseModel):
     note: str
 
     geometry: dict
+    # Per-constraint union geometries (wetlands/fema_flood/buildings/
+    # transmission), in EPSG:4326, keyed by the same layer names used in
+    # `breakdown`. Only present for layers that had data and a nonzero
+    # exclusion. Lets the frontend render each as an independent,
+    # toggleable overlay instead of only the combined "excluded" shape.
+    layers: dict = Field(default_factory=dict)
+
+
+class ParcelFeature(BaseModel):
+    parcel_id: str
+    geometry: GeoJSONGeometry
+
+
+class ParcelsInBboxResponse(BaseModel):
+    parcels: list[ParcelFeature]
+    count: int
+    truncated: bool
+    note: str

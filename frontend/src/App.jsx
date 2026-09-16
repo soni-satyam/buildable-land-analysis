@@ -1,10 +1,20 @@
-import React, { useState } from "react";
+import React, { useState, useCallback, useRef } from "react";
 import MapView from "./components/Map.jsx";
 
 const API_BASE = "http://localhost:8000";
 
+const LAYER_TOGGLES = [
+  { id: "parcel", label: "Parcel boundary" },
+  { id: "buildable", label: "Buildable area" },
+  { id: "excluded", label: "Excluded (all constraints)" },
+  { id: "wetlands", label: "Wetlands" },
+  { id: "fema_flood", label: "FEMA flood zones" },
+  { id: "buildings", label: "Building footprints/buffers" },
+  { id: "transmission", label: "Transmission lines" },
+];
+
 export default function App() {
-  const [parcelId, setParcelId] = useState("");
+  const [selectedParcelId, setSelectedParcelId] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -14,36 +24,64 @@ export default function App() {
     transmission_buffer_ft: 100,
     exclude_sfha: true,
   });
+  const [layerVisibility, setLayerVisibility] = useState(
+    Object.fromEntries(LAYER_TOGGLES.map((l) => [l.id, true]))
+  );
 
-  async function analyze(extra = {}) {
-    if (!parcelId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API_BASE}/api/analyze`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ parcel_id: parcelId, ...settings, ...extra }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || `Request failed (${res.status})`);
+  const analyze = useCallback(
+    async (parcelId, extra = {}) => {
+      if (!parcelId) return;
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(`${API_BASE}/api/analyze`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ parcel_id: parcelId, ...settings, ...extra }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `Request failed (${res.status})`);
+        }
+        const data = await res.json();
+        setResult(data);
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
       }
-      const data = await res.json();
-      setResult(data);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
+    },
+    [settings]
+  );
+
+  function handleParcelSelect(parcelId) {
+    setSelectedParcelId(parcelId);
+    analyze(parcelId);
   }
 
   function handleAdjustment(adjustment) {
-    analyze(adjustment);
+    if (!selectedParcelId) return;
+    analyze(selectedParcelId, adjustment);
   }
+
+  const analyzeTimerRef = useRef(null);
 
   function updateSetting(key, value) {
     setSettings((s) => ({ ...s, [key]: value }));
+    if (!selectedParcelId) return;
+    // Debounced: range sliders fire onChange continuously while dragging,
+    // so wait for a short pause before re-running the analysis. Pass the
+    // new value explicitly as an override rather than relying on `settings`
+    // state (which won't have updated yet in this closure) to avoid
+    // sending a stale request.
+    clearTimeout(analyzeTimerRef.current);
+    analyzeTimerRef.current = setTimeout(() => {
+      analyze(selectedParcelId, { [key]: value });
+    }, 300);
+  }
+
+  function toggleLayer(id) {
+    setLayerVisibility((v) => ({ ...v, [id]: !v[id] }));
   }
 
   return (
@@ -52,28 +90,22 @@ export default function App() {
         <div className="sidebar-header">
           <p className="eyebrow">HARRIS COUNTY, TX — FIPS 48201</p>
           <h1>Buildable Land Analysis</h1>
-          <p>Estimated buildable area, screened against wetlands, flood hazard, structures, and transmission easements.</p>
+          <p>Search a location or click a parcel on the map to see its estimated buildable area.</p>
         </div>
 
         <div className="section">
-          <p className="section-title">PARCEL</p>
-          <div className="field">
-            <label htmlFor="parcel-id">Prop_ID</label>
-            <input
-              id="parcel-id"
-              type="text"
-              value={parcelId}
-              onChange={(e) => setParcelId(e.target.value)}
-              placeholder="e.g. 0660640000012"
-              onKeyDown={(e) => e.key === "Enter" && analyze()}
-            />
-          </div>
-          <button className="btn-primary" onClick={() => analyze()} disabled={!parcelId || loading}>
-            {loading ? "Calculating…" : "Analyze parcel"}
-          </button>
-          {error && (
-            <p style={{ color: "#b95d40", fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>{error}</p>
+          <p className="section-title">SELECTED PARCEL</p>
+          {selectedParcelId ? (
+            <p className="empty-state">
+              Prop_ID <strong style={{ color: "var(--brass)" }}>{selectedParcelId}</strong>
+              {loading ? " — calculating…" : ""}
+            </p>
+          ) : (
+            <p className="empty-state">
+              Search for a location, zoom in, and click a parcel on the map to analyze it.
+            </p>
           )}
+          {error && <p style={{ color: "#b95d40", fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>{error}</p>}
         </div>
 
         <div className="section">
@@ -134,6 +166,16 @@ export default function App() {
           </label>
         </div>
 
+        <div className="section">
+          <p className="section-title">ANALYSIS LAYERS</p>
+          {LAYER_TOGGLES.map((l) => (
+            <label className="checkbox-row" key={l.id}>
+              <input type="checkbox" checked={layerVisibility[l.id]} onChange={() => toggleLayer(l.id)} />
+              {l.label}
+            </label>
+          ))}
+        </div>
+
         {result && (
           <div className="section">
             <p className="section-title">RESULT</p>
@@ -173,15 +215,14 @@ export default function App() {
             <p className="disclosure">{result.note}</p>
           </div>
         )}
-
-        {!result && !loading && !error && (
-          <div className="section">
-            <p className="empty-state">Enter a Prop_ID and click Analyze to see the buildable area breakdown and map.</p>
-          </div>
-        )}
       </aside>
 
-      <MapView result={result} onAdjustment={handleAdjustment} />
+      <MapView
+        result={result}
+        onAdjustment={handleAdjustment}
+        onParcelSelect={handleParcelSelect}
+        layerVisibility={layerVisibility}
+      />
     </div>
   );
 }

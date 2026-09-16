@@ -33,6 +33,60 @@ def _resolve(path_str: str) -> Path:
 
     return PROJECT_ROOT / p
 
+def load_parcels_in_bbox(
+    bbox_wgs84: tuple,
+    config: dict,
+    limit: int = 1500,
+) -> tuple[gpd.GeoDataFrame, str, bool]:
+    """
+    Loads only the parcels intersecting a viewport bounding box, for the
+    map's "parcels in view" layer. Deliberately reads only the id field
+    (not the full attribute table) and caps the result count, since the
+    full parcels layer has 1.5M+ features and must never be read in bulk.
+
+    Returns (gdf_in_wgs84, id_field, truncated) where `truncated` is True
+    if there were more matching parcels than `limit` (the caller should
+    tell the user to zoom in for a complete view).
+    """
+    cfg = config["paths"]["parcels"]
+    path = _resolve(cfg["file"])
+    id_field = cfg["id_field"]
+    source_crs = cfg.get("source_crs", "EPSG:4326")
+
+    if not path.exists():
+        raise DataNotAvailableError(
+            f"Parcels dataset not found at {path}. "
+            f"Make sure it's been downloaded and placed per config/setbacks.yaml."
+        )
+
+    query_bbox = _transform_bbox(bbox_wgs84, source_crs)
+
+    try:
+        gdf = gpd.read_file(
+            path,
+            layer=cfg.get("layer"),
+            bbox=query_bbox,
+            columns=[id_field],
+            max_features=limit + 1,  # fetch one extra to detect truncation
+            engine="pyogrio",
+        )
+    except DataSourceError as e:
+        raise DataNotAvailableError(f"Could not read parcels dataset at {path}: {e}") from e
+
+    if gdf.crs is None:
+        gdf = gdf.set_crs(source_crs)
+
+    truncated = len(gdf) > limit
+    if truncated:
+        gdf = gdf.iloc[:limit].copy()
+
+    gdf = gdf.to_crs("EPSG:4326")
+    # Light simplification keeps the viewport payload small; tolerance is in
+    # degrees and small enough not to visibly distort parcel shapes at the
+    # zoom levels this layer is meant to be viewed at.
+    gdf["geometry"] = gdf.geometry.simplify(0.00002, preserve_topology=True)
+
+    return gdf, id_field, truncated
 
 def load_parcel(
     parcel_id: str,

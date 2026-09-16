@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from shapely.geometry import shape, mapping
 import geopandas as gpd
@@ -6,9 +6,21 @@ from pyproj import CRS, Transformer
 from shapely.ops import transform
 
 from app.config import load_setback_config
-from app.data_loader import load_parcel, load_constraint_layers_near, DataNotAvailableError
+from app.data_loader import (
+    load_parcel,
+    load_parcels_in_bbox,
+    load_constraint_layers_near,
+    DataNotAvailableError,
+)
 from app.geometry import compute_buildable_area
-from app.models import AnalyzeRequest, AnalyzeResponse, BreakdownItem, GeoJSONGeometry
+from app.models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    BreakdownItem,
+    GeoJSONGeometry,
+    ParcelFeature,
+    ParcelsInBboxResponse,
+)
 
 app = FastAPI(title="Buildable Land Analysis API")
 
@@ -78,6 +90,56 @@ def get_parcel(parcel_id: str):
     if not geom.is_valid:
         geom = geom.make_valid()
     return {"parcel_id": parcel_id, "geometry": mapping(geom)}
+
+
+PARCEL_VIEWPORT_LIMIT = 1500
+
+
+@app.get("/api/parcels", response_model=ParcelsInBboxResponse)
+def get_parcels_in_viewport(
+    bbox: str = Query(
+        ...,
+        description="minLon,minLat,maxLon,maxLat (EPSG:4326), e.g. the current map viewport",
+    )
+):
+    try:
+        parts = [float(v) for v in bbox.split(",")]
+        if len(parts) != 4:
+            raise ValueError
+        minx, miny, maxx, maxy = parts
+    except ValueError:
+        raise HTTPException(400, "bbox must be 'minLon,minLat,maxLon,maxLat'")
+
+    if minx >= maxx or miny >= maxy:
+        raise HTTPException(400, "bbox min values must be less than max values")
+
+    # Guard against a very zoomed-out viewport triggering an expensive scan
+    # over a huge chunk of the 1.5M-parcel dataset.
+    if (maxx - minx) * (maxy - miny) > 0.25:  # roughly a ~55km-per-side box
+        raise HTTPException(
+            400,
+            "Viewport is too large to load parcels for - zoom in further before parcel outlines will appear.",
+        )
+
+    try:
+        gdf, id_field, truncated = load_parcels_in_bbox(
+            (minx, miny, maxx, maxy), CONFIG, limit=PARCEL_VIEWPORT_LIMIT
+        )
+    except DataNotAvailableError as e:
+        raise HTTPException(503, str(e))
+
+    features = [
+        ParcelFeature(parcel_id=str(getattr(row, id_field)), geometry=GeoJSONGeometry(**mapping(row.geometry)))
+        for row in gdf.itertuples(index=False)
+    ]
+
+    note = (
+        f"Showing {len(features)} of the parcels in view; zoom in for a complete set."
+        if truncated
+        else f"{len(features)} parcels in view."
+    )
+
+    return ParcelsInBboxResponse(parcels=features, count=len(features), truncated=truncated, note=note)
 
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
@@ -225,6 +287,18 @@ def analyze(req: AnalyzeRequest):
         else buildable_wgs84.difference(buildable_wgs84)  # empty geometry, same type
     )
 
+    # Per-constraint overlays (wetlands / fema_flood / buildings /
+    # transmission), reprojected back to WGS84, so the frontend can render
+    # and toggle each independently rather than only the combined
+    # "excluded" shape. Manual exclusions have no `.geometry` set and are
+    # skipped here - they're already part of `excluded`.
+    CONSTRAINT_LAYER_KEYS = {"wetlands", "fema_flood", "buildings", "transmission"}
+    layers_wgs84: dict = {}
+    for b in breakdown:
+        if b.layer in CONSTRAINT_LAYER_KEYS and b.geometry is not None and not b.geometry.is_empty:
+            g = gpd.GeoSeries([b.geometry], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
+            layers_wgs84[b.layer] = mapping(g)
+
     return AnalyzeResponse(
         parcel_id=req.parcel_id,
         parcel_acres=round(parcel_acres, 2),
@@ -241,4 +315,5 @@ def analyze(req: AnalyzeRequest):
             "buildable": mapping(buildable_wgs84),
             "excluded": mapping(excluded_wgs84),
         },
+        layers=layers_wgs84,
     )
