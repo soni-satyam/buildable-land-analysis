@@ -1,66 +1,99 @@
 # Buildable Land Analysis
 
-Given a parcel and a set of constraint layers (wetlands, flood zones, etc.),
-compute the buildable area, show it on an interactive map, and let a user
-carve out or restore area by hand.
+A GIS-based web application that helps estimate the **potentially buildable area of a land parcel** by identifying mapped constraints and applying configurable setback distances.
 
-## Structure
+The goal is to provide a quick, visual first-pass assessment of a parcel rather than a final development or regulatory decision.
 
-```
-buildable-land-analysis/
-├── backend/                # FastAPI service
-│   ├── app/
-│   │   ├── main.py         # API routes
-│   │   ├── config.py       # loads setback config
-│   │   ├── geometry.py     # buffer/subtract/area logic
-│   │   ├── models.py       # pydantic request/response schemas
-│   │   └── data_loader.py  # loads parcels + constraint layers
-│   ├── data/                # (gitignored) downloaded GIS data goes here
-│   └── requirements.txt
-├── frontend/                # React + MapLibre app
-│   ├── src/
-│   │   ├── App.jsx
-│   │   └── components/Map.jsx
-│   ├── index.html
-│   └── package.json
-├── config/
-│   └── setbacks.yaml        # configurable buffer distances, with sources
-└── README.md
-```
+## How It Works
 
-## Quickstart
+The analysis follows a simple workflow:
 
-### Backend
-```bash
-cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+1. Select a land parcel.
+2. Load relevant constraint layers around the parcel.
+3. Reproject the data to a common projected CRS for accurate distance and area calculations.
+4. Apply screening setbacks to selected constraints.
+5. Clip the constraints to the parcel.
+6. Union overlapping exclusion areas to avoid double-counting.
+7. Subtract the resulting exclusion area from the parcel.
+8. Display the remaining potentially buildable area on the map.
 
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
+The application also allows users to manually add or restore areas when the mapped data does not fully represent site conditions.
+
+## Constraints & Setbacks
+
+| Layer              | Treatment           |         Default |
+| ------------------ | ------------------- | --------------: |
+| Land Parcel        | Analysis boundary   |               — |
+| Wetlands           | Buffer              |           50 ft |
+| Flood Areas (SFHA) | Exclude mapped area | 0 ft additional |
+| Buildings          | Buffer              |           50 ft |
+| Transmission Lines | Buffer              |          100 ft |
+
+These are **screening assumptions**, not universal legal setbacks.
+
+The values were chosen as reasonable defaults for an initial feasibility screen. Wetland buffers can vary significantly by jurisdiction and wetland type, while transmission-line restrictions depend on the utility, voltage, and actual right-of-way. Flood requirements also depend on the specific flood zone and local regulations.
+
+The setback values are configurable in:
+
+```text
+config/setbacks.yaml
 ```
 
-## Data
+## Data Sources
 
-Download and place raw data under `backend/data/`:
-- Parcels: a Texas county from TNRIS (https://data.tnris.org)
-- Wetlands: USFWS National Wetlands Inventory
-- (Add a third layer of your choice — flood zones, transmission lines, etc.)
+The application uses publicly available GIS data for:
 
-## Notes on area calculation
+* Land Parcels
+* Wetlands
+* Flood Hazard Areas
+* Building Footprints
+* Transmission Lines
 
-Areas are computed by reprojecting geometries to an appropriate **equal-area
-or state-plane CRS** (e.g. Texas Centric Albers Equal Area, EPSG:6579, or the
-relevant UTM zone) before measuring — never directly in EPSG:3857 (Web
-Mercator), which distorts area significantly and gets worse away from the
-equator. This project intentionally does the correct, defensible thing here.
+### Original Sources
 
-## Writeup
+The original public sources are provided below for attribution and future updates.
 
-See `WRITEUP.md` (to be filled in) for approach, tradeoffs, data/setback
-sourcing, and known limitations.
+* **Land Parcels:** [SOURCE LINK]
+* **Wetlands:** [SOURCE LINK]
+* **Flood Areas:** [SOURCE LINK]
+* **Buildings:** [SOURCE LINK]
+* **Transmission Lines:** [SOURCE LINK]
+
+### Project Data
+
+The exact GIS files used for this implementation are available here:
+
+**[Google Drive – Project GIS Data](GOOGLE_DRIVE_LINK)**
+
+The Google Drive copy is provided for reproducibility; the original public sources remain the authoritative source for updated data.
+
+## Key Tradeoffs
+
+The application intentionally focuses on a small number of spatial constraints so that the analysis remains simple, fast, and easy to understand.
+
+The main tradeoff is that **"buildable area" does not mean legally developable area**. The current model does not account for factors such as zoning, access, utilities, easements, topography, soil conditions, or all local development regulations.
+
+## Limitations & Next Steps
+
+The results depend on the accuracy and date of the underlying GIS datasets. Public datasets may also contain missing or outdated information.
+
+For a production version, I would add:
+
+* Zoning and land-use rules
+* Jurisdiction-specific setbacks
+* Utility easements
+* Road/access constraints
+* Topography and slope
+* Dataset versioning and data-age indicators
+
+This would make the analysis more suitable for detailed land due diligence.
+
+## Tech Stack
+
+**Backend:** Python, FastAPI, GeoPandas, Shapely
+**Frontend:** React, MapLibre
+**Spatial Analysis:** EPSG:2278 for analysis, EPSG:4326 for map display
+
+## Disclaimer
+
+This tool is intended for **preliminary GIS screening and visualization**. The results should not be treated as a legal survey, zoning determination, floodplain certification, or development approval.
