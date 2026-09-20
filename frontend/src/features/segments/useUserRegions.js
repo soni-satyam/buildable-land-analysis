@@ -1,16 +1,5 @@
 import { useCallback, useRef, useState } from "react";
 
-/**
- * Owns the list of user-drawn sub-regions inside the selected parcel.
- * Each region: { id, geometry, mode: "buildable" | "nonbuildable" | null, acres }
- *
- * Regions start with mode=null (neutral, shown as dashed outline) until the
- * user right-clicks them to assign a mode. Right-clicking again cycles:
- *   null -> "buildable" -> "nonbuildable" -> removed
- *
- * onChange(payload) fires whenever the list or any mode changes, where:
- *   payload = { userRegionExcludes: Geometry[], userRegionRestores: Geometry[] }
- */
 export function useUserRegions(onChange) {
   const [regions, setRegions] = useState([]);
   const ref = useRef([]);
@@ -23,42 +12,42 @@ export function useUserRegions(onChange) {
     onChangeRef.current?.({ userRegionExcludes: excludes, userRegionRestores: restores });
   }, []);
 
+  const commit = useCallback((next) => {
+    ref.current = next;
+    setRegions(next);
+    emit(next);
+  }, [emit]);
+
   const addRegion = useCallback((geometry, acres) => {
     const id = `usr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const region = { id, geometry, mode: null, acres };
-    const next = [...ref.current, region];
-    ref.current = next;
-    setRegions(next);
-    emit(next);
+    commit([...ref.current, { id, geometry, mode: null, acres }]);
     return id;
-  }, [emit]);
+  }, [commit]);
 
-  /**
-   * Right-click a region: cycles null -> buildable -> nonbuildable -> (remove)
-   */
   const cycleMode = useCallback((id) => {
-    const next = ref.current.map((r) => {
-      if (r.id !== id) return r;
-      const nextMode = r.mode === null ? "buildable" : r.mode === "buildable" ? "nonbuildable" : null;
-      return { ...r, mode: nextMode };
-    });
-    ref.current = next;
-    setRegions(next);
-    emit(next);
-  }, [emit]);
+    const region = ref.current.find((r) => r.id === id);
+    if (!region) return;
+    if (region.mode === "nonbuildable") {
+      // instead of going back to null, just remove it
+      commit(ref.current.filter((r) => r.id !== id));
+    } else {
+      const nextMode = region.mode === null ? "buildable" : "nonbuildable";
+      commit(ref.current.map((r) => r.id !== id ? r : { ...r, mode: nextMode }));
+    }
+  }, [commit]);
 
   const removeRegion = useCallback((id) => {
-    const next = ref.current.filter((r) => r.id !== id);
-    ref.current = next;
-    setRegions(next);
-    emit(next);
-  }, [emit]);
+    commit(ref.current.filter((r) => r.id !== id));
+  }, [commit]);
 
   const reset = useCallback(() => {
     ref.current = [];
     setRegions([]);
-    // Don't emit on reset (new area, fresh slate)
   }, []);
 
-  return { regions, addRegion, cycleMode, removeRegion, reset };
+  const restore = useCallback((snapshot) => {
+    commit(snapshot ?? []);
+  }, [commit]);
+
+  return { regions, regionsRef: ref, addRegion, cycleMode, removeRegion, reset, restore };
 }

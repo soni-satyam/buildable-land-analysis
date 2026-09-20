@@ -17,12 +17,14 @@ import { useAdjustments } from "../../features/analysis/useAdjustments.js";
 import { useSegmentOverrides } from "../../features/segments/useSegmentOverrides.js";
 import { useSegmentInteractions } from "../../features/segments/useSegmentInteractions.js";
 import { useUserRegions } from "../../features/segments/useUserRegions.js";
+import { useHistory } from "../../map/useHistory.js";
 
 import MapSearchBox from "./MapSearchBox.jsx";
 import BasemapSwitcher from "./BasemapSwitcher.jsx";
-import DrawToolbar from "./DrawToolbar.jsx";
+import DrawToolbar from "./Drawtoolbar.jsx";
 import SegmentHoverTag from "./SegmentHoverTag.jsx";
 import SegmentOverridePanel from "./SegmentOverridePanel.jsx";
+import { polygonAreaAcres } from "../../map/geometryUtils.js";
 
 const TOOL_HINTS = {
   polygon: "Click points on the map, then click the last point again to finish.",
@@ -34,20 +36,22 @@ const TOOL_HINTS = {
   brush: "Hold the mouse button and paint. Ink fades after a few seconds and is never analysed.",
   pan: "Drag to move the map.",
 };
+
 const SHAPE_TOOLS = new Set(["polygon", "rectangle", "circle", "line", "freehand"]);
 
-/**
- * Props (unchanged): result, onAdjustment, onAreaSelected, layerVisibility, restoreBrushFt
- * Optional: onError(message)
- */
-export default function MapView({ result, onAdjustment, onAreaSelected, layerVisibility, restoreBrushFt, onError }) {
+export default function MapView({
+  result,
+  onAdjustment,
+  onAreaSelected,
+  layerVisibility,
+  restoreBrushFt,
+  onError,
+}) {
   const containerRef = useRef(null);
   const inkCanvasRef = useRef(null);
   const hasResultRef = useRef(false);
   hasResultRef.current = Boolean(result);
 
-  // Always-current ref to the parcel geometry so useDrawTool can detect
-  // whether a newly drawn shape falls inside the selected land.
   const parcelGeometryRef = useRef(null);
   parcelGeometryRef.current = result?.geometry?.parcel ?? null;
 
@@ -55,76 +59,226 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
   const [brushColor, setBrushColor] = useState("#ffd60a");
   const presenting = tool === "laser" || tool === "brush";
 
-  // Short, self-dismissing notice (e.g. "Land not selected").
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+
   const notify = useCallback((message) => {
     setToast(message);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
   }, []);
+
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
-  const { mapRef, ready, mapError, basemap, switchBasemap } = useMapInstance(containerRef);
+  const { mapRef, ready, mapError, basemap, switchBasemap } =
+    useMapInstance(containerRef);
+
   const search = useMapSearch(mapRef);
 
   const adjustments = useAdjustments({ onAdjustment, restoreBrushFt });
-  const { overrides, toggle, undo, clearAll, reset: resetOverrides } = useSegmentOverrides(adjustments.setSegmentOverrides);
-  const { regions: userRegions, addRegion, cycleMode: cycleUserRegionMode, removeRegion, reset: resetUserRegions } = useUserRegions(adjustments.setUserRegions);
+
+  const {
+    overrides,
+    overridesRef,
+    toggle,
+    undo: undoOverride,
+    clearAll,
+    reset: resetOverrides,
+    restore: restoreOverrides,
+  } = useSegmentOverrides(adjustments.setSegmentOverrides);
+
+  const {
+    regions: userRegions,
+    regionsRef: userRegionsRef,
+    addRegion,
+    cycleMode: cycleUserRegionMode,
+    removeRegion,
+    reset: resetUserRegions,
+    restore: restoreUserRegions,
+  } = useUserRegions(adjustments.setUserRegions);
+
   const resetAdjustments = adjustments.reset;
 
-  // Hook order = layer stacking order: parcels < analysis + segments < pending selection < sketch.
   const { zoomedOut } = useViewportParcels(mapRef, ready);
-  useAnalysisLayers(mapRef, ready, { result, overrides, visibility: layerVisibility, userRegions });
-  const { hasPending, resetDraw, submitShape } = useDrawTool(mapRef, ready, {
+
+  useAnalysisLayers(mapRef, ready, {
+    result,
+    overrides,
+    visibility: layerVisibility,
+    userRegions,
+  });
+
+  const takeSnapshot = useCallback(() => ({
+      drawnShapes: [...drawnShapesRef.current],
+      drawnExcludes: [...adjustments.getLists().drawnExcludes],
+      brushRestores: [...adjustments.getLists().brushRestores],
+      userRegions: [...userRegionsRef.current],
+    }),[]); // no deps — reads refs directly, always current
+
+  const applySnapshotRef = useRef(null);
+
+  const history = useHistory(
+    (snapshot) => applySnapshotRef.current?.(snapshot),
+  );
+
+  const historyRef = useRef(history);
+  historyRef.current = history;
+
+  const {
+    hasPending,
+    resetDraw,
+    submitShape,
+    drawnShapesRef,
+    restoreDrawn,
+  } = useDrawTool(mapRef, ready, {
     tool,
     hasResultRef,
     parcelGeometryRef,
+
     onAreaSelected: (geometry) => {
-      resetOverrides();    // segment ids belong to one analysis
-      resetUserRegions();  // user regions belong to one selection
-      resetAdjustments();  // a new area starts from a clean slate
+      resetOverrides();
+      resetUserRegions();
+      resetAdjustments();
+      historyRef.current.reset();
       onAreaSelected?.(geometry);
     },
+
     onSubSelect: (geometry) => {
-      // Estimate acres client-side (rough, good enough for the panel label).
-      // The backend will use the real geometry for analysis.
-      addRegion(geometry, null);
+      addRegion(geometry, polygonAreaAcres(geometry));
+      historyRef.current.push(takeSnapshot());
     },
-    onExclude: adjustments.addExclude,
+
+    onExclude: (geometry) => {
+      adjustments.addExclude(geometry);
+      historyRef.current.push(takeSnapshot());
+    },
+
     onError,
   });
-  const sketch = useSketchTool(mapRef, ready, { tool, submitShape, resolveLines: linesToArea, notify });
-  const { clearInk } = useTransientInk(mapRef, ready, inkCanvasRef, { tool, color: brushColor });
 
-  // While presenting (laser / brush) a stray right-click must not flip pieces or paint a restore.
-  const { hovered } = useSegmentInteractions(mapRef, ready, {
-    result,
-    onToggleSegment: (key, segment) => !presenting && toggle(key, segment),
-    onRestoreAt: (lngLat) => !presenting && hasResultRef.current && adjustments.restoreAt(lngLat),
-    onCycleUserRegion: (id) => !presenting && cycleUserRegionMode(id),
+  applySnapshotRef.current = (snapshot) => {
+    if (!snapshot) {
+      restoreDrawn([]);
+      adjustments.restoreDrawnAndBrush([], []);
+      restoreUserRegions([]);
+      return;
+    }
+    restoreDrawn(snapshot.drawnShapes);
+    adjustments.restoreDrawnAndBrush(snapshot.drawnExcludes, snapshot.brushRestores);
+    restoreUserRegions(snapshot.userRegions);
+  };
+
+
+  const sketch = useSketchTool(mapRef, ready, {
+    tool,
+    submitShape,
+    resolveLines: linesToArea,
+    notify,
   });
 
-  // "New selection" clears the result -> drop every manual edit and pending shape.
+  const { clearInk } = useTransientInk(
+    mapRef,
+    ready,
+    inkCanvasRef,
+    {
+      tool,
+      color: brushColor,
+    },
+  );
+
+  const { hovered } = useSegmentInteractions(mapRef, ready, {
+    result,
+
+    onToggleSegment: (key, segment) => {
+      if (presenting) return;
+      toggle(key, segment);
+    },
+
+    onRestoreAt: (lngLat) => {
+      if (presenting || !hasResultRef.current) return;
+      adjustments.restoreAt(lngLat);
+    },
+
+    onCycleUserRegion: (id) => {
+      if (presenting) return;
+      cycleUserRegionMode(id);
+    },
+  });
+
+  // Keyboard shortcuts.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (
+        e.target?.tagName === "INPUT" ||
+        e.target?.tagName === "TEXTAREA"
+      ) {
+        return;
+      }
+
+      if (tool === "line" || tool === "freehand") {
+        return; // sketch handles Ctrl+Z itself
+      }
+
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "z" &&
+        !e.shiftKey
+      ) {
+        e.preventDefault();
+        history.undo();
+      }
+
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        (
+          e.key.toLowerCase() === "y" ||
+          (e.key.toLowerCase() === "z" && e.shiftKey)
+        )
+      ) {
+        e.preventDefault();
+        history.redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, history.undo, history.redo]);
+
+  // New selection clears everything.
   useEffect(() => {
     if (!result) {
       resetOverrides();
       resetUserRegions();
       resetAdjustments();
+      history.reset();
       resetDraw();
       sketch.clearAll();
     }
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result]);
 
   const activeLayerKeys = result
-    ? ANALYSIS_LAYER_IDS.filter((id) => id === "parcel" || id === "buildable" || id === "excluded" || result.layers?.[id])
+    ? ANALYSIS_LAYER_IDS.filter(
+        (id) =>
+          id === "parcel" ||
+          id === "buildable" ||
+          id === "excluded" ||
+          result.layers?.[id],
+      )
     : [];
 
   let hint = TOOL_HINTS[tool];
+
   if (SHAPE_TOOLS.has(tool)) {
-    if (hasPending) hint = 'Click "Calculate Buildable Area" to analyze the selected land.';
-    else if (result) hint = "Draw inside your land to mark a custom region (right-click to set buildable/non-buildable). Draw outside to exclude that area. Right-click a highlighted segment to flip it.";
+    if (hasPending) {
+      hint = 'Click "Calculate Buildable Area" to analyze the selected land.';
+    } else if (result) {
+      hint =
+        "Draw inside your land to mark a custom region (right-click to set buildable/non-buildable). Draw outside to exclude that area. Right-click a highlighted segment to flip it.";
+    }
   }
 
   return (
@@ -138,7 +292,12 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
         onPick={search.flyToSearchResult}
         onReset={search.resetToHarrisCounty}
       />
-      <BasemapSwitcher basemap={basemap} onChange={switchBasemap} />
+
+      <BasemapSwitcher
+        basemap={basemap}
+        onChange={switchBasemap}
+      />
+
       <DrawToolbar
         tool={tool}
         onToolChange={setTool}
@@ -146,31 +305,70 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
         brushColor={brushColor}
         onBrushColorChange={setBrushColor}
         onClearInk={clearInk}
+        canUndo={history.canUndo}
+        canRedo={history.canRedo}
+        onUndo={hasPending ? resetDraw : history.undo}  
+        onRedo={history.redo}
       />
 
       <div className="draw-hint">{hint}</div>
-      {toast && <div className="map-toast" role="alert">{toast}</div>}
 
-      {zoomedOut && <div className="zoom-hint">Zoom in to see reference parcel boundaries</div>}
+      {toast && (
+        <div className="map-toast" role="alert">
+          {toast}
+        </div>
+      )}
+
+      {zoomedOut && (
+        <div className="zoom-hint">
+          Zoom in to see reference parcel boundaries
+        </div>
+      )}
 
       {result && activeLayerKeys.length > 0 && (
         <div className="legend">
           {activeLayerKeys.map((id) => (
             <div className="legend-item" key={id}>
-              <span className="legend-swatch" style={{ background: LAYER_COLORS[id] }} />
+              <span
+                className="legend-swatch"
+                style={{ background: LAYER_COLORS[id] }}
+              />
               {LAYER_LABELS[id]}
             </div>
           ))}
         </div>
       )}
 
-      {mapError && <div className="map-error-banner">{mapError}</div>}
+      {mapError && (
+        <div className="map-error-banner">
+          {mapError}
+        </div>
+      )}
 
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
-      <canvas ref={inkCanvasRef} className="ink-canvas" />
+      <div
+        ref={containerRef}
+        style={{ width: "100%", height: "100%" }}
+      />
 
-      {result && <SegmentOverridePanel overrides={overrides} onUndo={undo} onClearAll={clearAll} userRegions={userRegions} onRemoveRegion={removeRegion} />}
-      <SegmentHoverTag hovered={hovered} overrides={overrides} />
+      <canvas
+        ref={inkCanvasRef}
+        className="ink-canvas"
+      />
+
+      {result && (
+        <SegmentOverridePanel
+          overrides={overrides}
+          onUndo={undoOverride}
+          onClearAll={clearAll}
+          userRegions={userRegions}
+          onRemoveRegion={removeRegion}
+        />
+      )}
+
+      <SegmentHoverTag
+        hovered={hovered}
+        overrides={overrides}
+      />
     </div>
   );
 }

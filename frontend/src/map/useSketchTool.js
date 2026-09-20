@@ -165,7 +165,11 @@ export function useSketchTool(mapRef, ready, { tool, submitShape, resolveLines, 
       const t = e.target;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === "Enter") { e.preventDefault(); finish(); }
-      else if (e.key === "Backspace" || e.key === "Delete" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z")) { e.preventDefault(); undo(); }
+      else if (e.key === "Backspace" || e.key === "Delete" || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z")) {
+        e.preventDefault();
+        e.stopPropagation(); // ← add this
+        undo();
+      }
       else if (e.key === "Escape") cancel();
     }
 

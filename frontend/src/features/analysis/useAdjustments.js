@@ -1,16 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import { makeCircle } from "../../map/geometryUtils.js";
 
-// Verified against your old Map.jsx: the backend takes arrays of
-// { kind, geometry } under these two keys.
 export const ADJUSTMENT_KEYS = { excludes: "user_exclusions", restores: "user_restores" };
 
-/**
- * Accumulates every manual edit and reports the FULL arrays each time:
- *   drawn excludes    (polygon drawn after a result exists)
- *   brush restores    (right-click on empty space, restoreBrushFt radius; debounced 200ms like before)
- *   segment excludes / restores (from useSegmentOverrides)
- */
 export function useAdjustments({ onAdjustment, restoreBrushFt }) {
   const cb = useRef({});
   cb.current = { onAdjustment, restoreBrushFt };
@@ -49,20 +41,25 @@ export function useAdjustments({ onAdjustment, restoreBrushFt }) {
     restoreTimer.current = setTimeout(emit, 200);
   }, [emit]);
 
-  // Wire to useSegmentOverrides' onChange. "reset" = a new analysis is
-  // starting: store the empty lists but don't trigger a re-analysis.
   const setSegmentOverrides = useCallback((payload, reason) => {
     lists.current.segRestores = payload.restores;
     lists.current.segExcludes = payload.excludes;
     if (reason !== "reset") emit();
   }, [emit]);
 
-  // Wire to useUserRegions' onChange.
   const setUserRegions = useCallback((payload) => {
     lists.current.userRegionExcludes = payload.userRegionExcludes ?? [];
     lists.current.userRegionRestores = payload.userRegionRestores ?? [];
     emit();
   }, [emit]);
+
+  const restoreDrawnAndBrush = useCallback((drawnExcludes, brushRestores) => {
+    lists.current.drawnExcludes = drawnExcludes ?? [];
+    lists.current.brushRestores = brushRestores ?? [];
+    emit();
+  }, [emit]);
+
+  const getLists = useCallback(() => ({ ...lists.current }), []);
 
   const reset = useCallback(() => {
     clearTimeout(restoreTimer.current);
@@ -75,5 +72,5 @@ export function useAdjustments({ onAdjustment, restoreBrushFt }) {
 
   useEffect(() => () => clearTimeout(restoreTimer.current), []);
 
-  return { addExclude, restoreAt, setSegmentOverrides, setUserRegions, reset };
+  return { addExclude, restoreAt, setSegmentOverrides, setUserRegions, restoreDrawnAndBrush, getLists, reset };
 }

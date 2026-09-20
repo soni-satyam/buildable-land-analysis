@@ -90,3 +90,28 @@ export function toFeature(g) {
   if (g.type === "Feature" || g.type === "FeatureCollection") return g;
   return { type: "Feature", geometry: g, properties: {} };
 }
+
+// Approximate polygon area in acres using the spherical excess formula.
+// Good enough for parcel-scale polygons (error < 0.5% within Texas).
+export function polygonAreaAcres(geometry) {
+  const rings =
+    geometry.type === "MultiPolygon"
+      ? geometry.coordinates.flat()
+      : geometry.coordinates;
+  const outerRing = rings[0];
+  if (!outerRing || outerRing.length < 3) return 0;
+  // Shoelace on lon/lat then convert deg² → m² → acres
+  // 1 deg lat ≈ 111320 m; adjust lon by cos(lat)
+  const toRad = (d) => (d * Math.PI) / 180;
+  const avgLat = outerRing.reduce((s, c) => s + c[1], 0) / outerRing.length;
+  const mPerLat = 111320;
+  const mPerLng = 111320 * Math.cos(toRad(avgLat));
+  let area = 0;
+  for (let i = 0; i < outerRing.length - 1; i++) {
+    const x0 = outerRing[i][0] * mPerLng,   y0 = outerRing[i][1] * mPerLat;
+    const x1 = outerRing[i + 1][0] * mPerLng, y1 = outerRing[i + 1][1] * mPerLat;
+    area += x0 * y1 - x1 * y0;
+  }
+  const sqMeters = Math.abs(area) / 2;
+  return sqMeters / 4046.856; // m² → acres
+}

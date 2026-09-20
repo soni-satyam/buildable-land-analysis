@@ -5,11 +5,14 @@
   z-index: 1;
 }
 
-/* Cursor per tool. !important because terra-draw sets its own inline cursor. */
-.map-area.tool-laser .maplibregl-canvas { cursor: none !important; }
-.map-area.tool-brush .ink-canvas { cursor: crosshair; }
-.map-area.tool-pan .maplibregl-canvas { cursor: grab !important; }
+/* Cursor per tool */
+.map-area.tool-laser .maplibregl-canvas    { cursor: none !important; }
+.map-area.tool-brush .maplibregl-canvas    { cursor: crosshair !important; }
+.map-area.tool-pan .maplibregl-canvas      { cursor: grab !important; }
+.map-area.tool-line .maplibregl-canvas,
+.map-area.tool-freehand .maplibregl-canvas { cursor: crosshair !important; }
 
+/* ── Toolbar panel ─────────────────────────────────────────────── */
 .draw-toolbar {
   position: absolute;
   left: 12px;
@@ -24,9 +27,24 @@
   color: #f1efe9;
   border-radius: 6px;
   font-size: 13px;
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
 }
-.draw-toolbar-group { display: flex; flex-direction: column; gap: 4px; }
-.draw-toolbar-label { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.6; }
+
+.draw-toolbar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.draw-toolbar-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+/* All buttons inside the toolbar */
 .draw-toolbar button {
   text-align: left;
   padding: 5px 8px;
@@ -35,21 +53,65 @@
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 4px;
   cursor: pointer;
+  font-size: 13px;
 }
-.draw-toolbar button:hover { background: rgba(255, 255, 255, 0.08); }
-.draw-toolbar button.active { background: #c99a46; border-color: #c99a46; color: #1b1b1b; }
-.draw-toolbar button:focus-visible { outline: 2px solid #c99a46; outline-offset: 2px; }
-.draw-toolbar-option { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.15); }
-.draw-toolbar-swatches { display: flex; gap: 6px; }
-.draw-toolbar-swatches button { width: 24px; height: 24px; padding: 0; border-radius: 50%; }
-.draw-toolbar-swatches button.active { outline: 2px solid #fff; outline-offset: 2px; }
+.draw-toolbar button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); }
+.draw-toolbar button.active               { background: #c99a46; border-color: #c99a46; color: #1b1b1b; }
+.draw-toolbar button:focus-visible        { outline: 2px solid #c99a46; outline-offset: 2px; }
+.draw-toolbar button:disabled             { opacity: 0.4; cursor: default; }
 
-.map-area.tool-line .maplibregl-canvas,
-.map-area.tool-freehand .maplibregl-canvas { cursor: crosshair !important; }
+/* ── Undo / Redo ──────────────────────────────────────────────────────────── */
+.draw-toolbar-history {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+}
+.draw-toolbar-history-btn {
+  flex: 1;
+  text-align: center !important;
+  font-size: 12px;
+  padding: 5px 4px !important;
+}
+.draw-toolbar-history-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
 
-.draw-toolbar button:disabled { opacity: 0.4; cursor: default; }
-.draw-toolbar-count { font-size: 12px; opacity: 0.75; }
+/* ── Sketch controls (line / freehand) ────────────────────────── */
+.draw-toolbar-option {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+}
 
+.draw-toolbar-count {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+/* ── Brush colour swatches ────────────────────────────────────── */
+.draw-toolbar-swatches {
+  display: flex;
+  gap: 6px;
+}
+
+.draw-toolbar-swatches button {
+  width: 24px;
+  height: 24px;
+  padding: 0 !important;
+  border-radius: 50%;
+}
+
+.draw-toolbar-swatches button.active {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+/* ── Toast notification ───────────────────────────────────────── */
 .map-toast {
   position: absolute;
   top: 64px;
