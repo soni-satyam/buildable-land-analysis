@@ -67,6 +67,10 @@ class BreakdownItem(BaseModel):
     buffer_ft: float
     reason: str
 
+class SegmentFeature(BaseModel):
+    id: str
+    acres: float
+    geometry: GeoJSONGeometry
 
 class AnalyzeResponse(BaseModel):
     # None when the analyzed area was a freehand drawn polygon rather than
@@ -87,6 +91,7 @@ class AnalyzeResponse(BaseModel):
 
     geometry: dict
     layers: dict = Field(default_factory=dict)
+    segments: dict[str, list[SegmentFeature]] = Field(default_factory=dict)
 
 
 class ParcelFeature(BaseModel):
@@ -99,3 +104,14 @@ class ParcelsInBboxResponse(BaseModel):
     count: int
     truncated: bool
     note: str
+    
+
+class LinesToAreaRequest(BaseModel):
+    lines: list[GeoJSONGeometry]      # LineStrings, EPSG:4326
+    snap_ft: float = 15.0             # gaps up to this size between line ends count as connected
+ 
+ 
+class LinesToAreaResponse(BaseModel):
+    # None when the lines don't enclose any land.
+    geometry: Optional[GeoJSONGeometry] = None
+ 

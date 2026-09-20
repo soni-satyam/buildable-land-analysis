@@ -1,8 +1,7 @@
 import React, { useState, useCallback, useRef } from "react";
-import MapView from "./components/Map.jsx";
-import { LAYER_COLORS, LAYER_LABELS } from "./layerColors.js";
-
-const API_BASE = "http://localhost:8000";
+import MapView from "./components/map/MapDraw.jsx";
+import { LAYER_COLORS, LAYER_LABELS } from "./map/layerColors.js";
+import { analyzeArea } from "./features/analysis/analysisApi.js";
 
 const LAYER_TOGGLES = [
   { id: "parcel", label: "Parcel boundary" },
@@ -29,47 +28,55 @@ export default function App() {
     Object.fromEntries(LAYER_TOGGLES.map((l) => [l.id, true]))
   );
   const selectionRef = useRef(null);
+  const adjustmentRef = useRef({});
+    // Guards against out-of-order responses: if the user tweaks a slider
+  // twice quickly, two requests can be in flight at once, and the older
+  // one isn't guaranteed to resolve first. Without this, a slow stale
+  // response arriving after a newer one could silently overwrite the
+  // fresher result - looking exactly like "the map stopped updating".
+  const requestIdRef = useRef(0);
 
   const runAnalyze = useCallback(
-    async (extra = {}) => {
-      const selection = selectionRef.current;
-      if (!selection) return;
+    async (target, extra = {}) => {
+      if (!target) return;
+      const thisRequestId = ++requestIdRef.current;
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`${API_BASE}/api/analyze`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...selection, ...settings, ...extra }),
+        const data = await analyzeArea({
+          ...target,
+          ...settings,
+          ...adjustmentRef.current,
+          ...extra,
         });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.detail || `Request failed (${res.status})`);
-        }
-        const data = await res.json();
+        if (thisRequestId !== requestIdRef.current) return; // a newer request superseded this one
         setResult(data);
       } catch (e) {
+        if (thisRequestId !== requestIdRef.current) return;
         setError(e.message);
       } finally {
-        setLoading(false);
+        if (thisRequestId === requestIdRef.current) setLoading(false);
       }
     },
     [settings]
   );
 
+
   function handleAreaSelected(geometry) {
-    selectionRef.current = { custom_geometry: geometry };    runAnalyze();
+    adjustmentRef.current = {};
+    selectionRef.current = { custom_geometry: geometry };
+    runAnalyze(selectionRef.current);
   }
 
-  // Called by MapView on every subsequent exclude/restore draw, with the
-  // full accumulated arrays so far.
   function handleAdjustment(adjustment) {
     if (!selectionRef.current) return;
-    runAnalyze(adjustment);
+    adjustmentRef.current = adjustment; // MapView sends the FULL arrays each time
+    runAnalyze(selectionRef.current, adjustment);
   }
 
   function startNewSelection() {
     selectionRef.current = null;
+    adjustmentRef.current = {};
     setResult(null);
     setError(null);
   }
@@ -79,14 +86,9 @@ export default function App() {
   function updateSetting(key, value) {
     setSettings((s) => ({ ...s, [key]: value }));
     if (!selectionRef.current) return;
-    // Debounced: range sliders fire onChange continuously while dragging,
-    // so wait for a short pause before re-running the analysis. Pass the
-    // new value explicitly as an override rather than relying on `settings`
-    // state (which won't have updated yet in this closure) to avoid
-    // sending a stale request.
     clearTimeout(analyzeTimerRef.current);
     analyzeTimerRef.current = setTimeout(() => {
-      runAnalyze({ [key]: value });
+      runAnalyze(selectionRef.current, { [key]: value });
     }, 300);
   }
 

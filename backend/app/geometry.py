@@ -23,6 +23,38 @@ from shapely.ops import unary_union
 SQ_FT_PER_ACRE = 43560.0
 SQ_M_PER_ACRE = 4046.8564224
 
+def _explode_segments(geom):
+    """
+    Split a Polygon/MultiPolygon/GeometryCollection into a list of
+    individual, disjoint Polygon pieces - e.g. two separate wetland
+    ponds within a parcel become two separate segments instead of one
+    merged shape. Lets the frontend offer each piece as its own
+    independently clickable/overridable object, the way an image
+    segmentation tool offers each detected object separately.
+
+    Sorted by centroid so segment ordering (and therefore the ids
+    assigned to them) is deterministic given the same input geometry.
+    """
+    if geom is None or geom.is_empty:
+        return []
+
+    if geom.geom_type == "Polygon":
+        parts = [geom]
+    elif geom.geom_type == "MultiPolygon":
+        parts = list(geom.geoms)
+    elif geom.geom_type == "GeometryCollection":
+        parts = []
+        for g in geom.geoms:
+            if g.geom_type == "Polygon":
+                parts.append(g)
+            elif g.geom_type == "MultiPolygon":
+                parts.extend(list(g.geoms))
+    else:
+        return []
+
+    parts = [p for p in parts if p is not None and not p.is_empty and p.area > 0]
+    parts.sort(key=lambda p: (round(p.centroid.x, 1), round(p.centroid.y, 1)))
+    return parts
 
 @dataclass
 class LayerResult:
@@ -170,6 +202,7 @@ def compute_buildable_area(
 
     breakdown: list[LayerResult] = []
     per_layer_exclusions: list[base.BaseGeometry] = []
+    segments: dict[str, list] = {}
 
     # ---------------------------------------------------------
     # Wetlands
@@ -215,6 +248,8 @@ def compute_buildable_area(
 
         if clipped is not None and not clipped.is_empty:
             per_layer_exclusions.append(clipped)
+        
+        segments["wetlands"] = _explode_segments(clipped) 
 
     # ---------------------------------------------------------
     # FEMA
@@ -262,6 +297,7 @@ def compute_buildable_area(
             if clipped is not None and not clipped.is_empty:
                 per_layer_exclusions.append(clipped)
 
+            segments["fema_flood"] = _explode_segments(clipped) 
     # ---------------------------------------------------------
     # Buildings
     # ---------------------------------------------------------
@@ -306,6 +342,8 @@ def compute_buildable_area(
 
         if clipped is not None and not clipped.is_empty:
             per_layer_exclusions.append(clipped)
+        
+        segments["buildings"] = _explode_segments(clipped)
 
     # ---------------------------------------------------------
     # Transmission
@@ -351,11 +389,21 @@ def compute_buildable_area(
 
         if clipped is not None and not clipped.is_empty:
             per_layer_exclusions.append(clipped)
+        
+        segments["transmission"] = _explode_segments(clipped)
 
     # ---------------------------------------------------------
     # Manual exclusions
     # ---------------------------------------------------------
-
+    natural_excluded_geom = _safe_union(per_layer_exclusions)
+    natural_buildable_geom = (
+        parcel_geom.difference(natural_excluded_geom)
+        if natural_excluded_geom is not None
+        else parcel_geom
+    )
+    natural_buildable_geom = _make_valid_geom(natural_buildable_geom)
+    segments["buildable"] = _explode_segments(natural_buildable_geom)
+    
     manual_exclude_geoms = []
 
     for geom in manual_excludes or []:
@@ -493,6 +541,7 @@ def compute_buildable_area(
         buildable_geom,
         excluded_geom,
         restored_acres,
+        segments
     )
     
     

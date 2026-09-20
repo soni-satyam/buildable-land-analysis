@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from shapely.geometry import shape, mapping
+from shapely.geometry import shape, mapping, LineString, Point
 import geopandas as gpd
 from pyproj import CRS, Transformer
-from shapely.ops import transform
+from shapely.ops import transform, unary_union, polygonize, nearest_points
 
 from app.config import load_setback_config
 from app.data_loader import (
@@ -18,8 +18,11 @@ from app.models import (
     AnalyzeResponse,
     BreakdownItem,
     GeoJSONGeometry,
+    LinesToAreaRequest,
+    LinesToAreaResponse,
     ParcelFeature,
     ParcelsInBboxResponse,
+    SegmentFeature,
 )
 
 app = FastAPI(title="Buildable Land Analysis API")
@@ -141,6 +144,58 @@ def get_parcels_in_viewport(
 
     return ParcelsInBboxResponse(parcels=features, count=len(features), truncated=truncated, note=note)
 
+MAX_SKETCH_LINES = 200
+
+@app.post("/api/lines-to-area", response_model=LinesToAreaResponse)
+def lines_to_area(req: LinesToAreaRequest):
+    """
+    Turn hand-drawn lines into the land they enclose.
+
+    Works in the analytical CRS (feet). Lines may cross each other or stop a
+    little short of meeting; ends within `snap_ft` of another line (or of
+    their own opposite end) are bridged. Returns geometry=null when the
+    lines don't close off any area.
+    """
+    if not req.lines or len(req.lines) > MAX_SKETCH_LINES:
+        raise HTTPException(400, f"Provide between 1 and {MAX_SKETCH_LINES} lines")
+
+    lines = []
+    for g in req.lines:
+        geom = _geojson_to_area_crs(g, AREA_CRS)
+        parts = list(geom.geoms) if geom.geom_type.startswith("Multi") else [geom]
+        lines.extend(p for p in parts if p.geom_type == "LineString" and p.length > 0)
+
+    if not lines:
+        return LinesToAreaResponse()
+
+    # Bridge small gaps at line ends.
+    tol = max(float(req.snap_ft), 0.0)
+    bridges = []
+    if tol > 0:
+        for i, line in enumerate(lines):
+            if line.length <= tol:
+                continue
+            start, end = Point(line.coords[0]), Point(line.coords[-1])
+            others = [l for j, l in enumerate(lines) if j != i]
+            for p, opposite in ((start, end), (end, start)):
+                target = unary_union(others + [opposite])
+                q = nearest_points(p, target)[1]
+                d = p.distance(q)
+                if 0 < d <= tol:
+                    bridges.append(LineString([p, q]))
+
+    # unary_union nodes the lines (splits them where they cross);
+    # polygonize then returns every closed face they form.
+    noded = unary_union(lines + bridges)
+    segments = list(noded.geoms) if hasattr(noded, "geoms") else [noded]
+    faces = [f for f in polygonize(segments) if f.area > 1.0]  # > 1 sq ft, ignores slivers
+    if not faces:
+        return LinesToAreaResponse()
+
+    area = unary_union(faces)
+    area_wgs84 = gpd.GeoSeries([area], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
+    return LinesToAreaResponse(geometry=GeoJSONGeometry(**mapping(area_wgs84)))
+
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
@@ -161,10 +216,10 @@ def analyze(req: AnalyzeRequest):
         # for it, so it's built directly from the submitted GeoJSON
         # (EPSG:4326, as MapLibre/GeoJSON always is) rather than looked up.
         drawn_geom = shape(req.custom_geometry.dict())
-        if not drawn_geom.is_valid:
-            drawn_geom = drawn_geom.make_valid()
         if drawn_geom.is_empty:
             raise HTTPException(422, "Drawn area geometry is empty")
+        if not drawn_geom.is_valid:
+            drawn_geom = drawn_geom.make_valid()
         parcel_gdf = gpd.GeoDataFrame(geometry=[drawn_geom], crs="EPSG:4326")
 
     geom = parcel_gdf.geometry.iloc[0]
@@ -287,6 +342,7 @@ def analyze(req: AnalyzeRequest):
         buildable_geom,
         excluded_geom,
         restored_acres,
+        segments,
     ) = compute_buildable_area(
         parcel_gdf,
         constraint_layers,
@@ -315,6 +371,27 @@ def analyze(req: AnalyzeRequest):
         if b.layer in CONSTRAINT_LAYER_KEYS and b.geometry is not None and not b.geometry.is_empty:
             g = gpd.GeoSeries([b.geometry], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
             layers_wgs84[b.layer] = mapping(g)
+    
+    segments_wgs84: dict = {}
+    crs_units_are_feet = "2278" in AREA_CRS or "ftUS" in AREA_CRS
+    sqft_per_acre = 43560.0
+    sqm_per_acre = 4046.8564224
+    for layer_key, geoms in segments.items():
+        if not geoms:
+            continue
+        acres_list = [
+            g.area / (sqft_per_acre if crs_units_are_feet else sqm_per_acre)
+            for g in geoms
+        ]
+        segments_gs = gpd.GeoSeries(geoms, crs=AREA_CRS).to_crs("EPSG:4326")
+        segments_wgs84[layer_key] = [
+            SegmentFeature(
+                id=f"{layer_key}-{i}",
+                acres=round(acres_list[i], 4),
+                geometry=GeoJSONGeometry(**mapping(g)),
+            )
+            for i, g in enumerate(segments_gs)
+        ]
 
     return AnalyzeResponse(
         parcel_id=selection_label,
@@ -334,4 +411,5 @@ def analyze(req: AnalyzeRequest):
             "excluded": mapping(excluded_wgs84),
         },
         layers=layers_wgs84,
+        segments=segments_wgs84
     )
