@@ -14,7 +14,11 @@ export const ADJUSTMENT_KEYS = { excludes: "user_exclusions", restores: "user_re
 export function useAdjustments({ onAdjustment, restoreBrushFt }) {
   const cb = useRef({});
   cb.current = { onAdjustment, restoreBrushFt };
-  const lists = useRef({ drawnExcludes: [], brushRestores: [], segExcludes: [], segRestores: [] });
+  const lists = useRef({
+    drawnExcludes: [], brushRestores: [],
+    segExcludes: [], segRestores: [],
+    userRegionExcludes: [], userRegionRestores: [],
+  });
   const restoreTimer = useRef(null);
 
   const emit = useCallback(() => {
@@ -23,10 +27,12 @@ export function useAdjustments({ onAdjustment, restoreBrushFt }) {
       [ADJUSTMENT_KEYS.excludes]: [
         ...l.drawnExcludes,
         ...l.segExcludes.map((geometry) => ({ kind: "exclude", geometry })),
+        ...l.userRegionExcludes.map((geometry) => ({ kind: "exclude", geometry })),
       ],
       [ADJUSTMENT_KEYS.restores]: [
         ...l.brushRestores,
         ...l.segRestores.map((geometry) => ({ kind: "restore", geometry })),
+        ...l.userRegionRestores.map((geometry) => ({ kind: "restore", geometry })),
       ],
     });
   }, []);
@@ -51,12 +57,23 @@ export function useAdjustments({ onAdjustment, restoreBrushFt }) {
     if (reason !== "reset") emit();
   }, [emit]);
 
+  // Wire to useUserRegions' onChange.
+  const setUserRegions = useCallback((payload) => {
+    lists.current.userRegionExcludes = payload.userRegionExcludes ?? [];
+    lists.current.userRegionRestores = payload.userRegionRestores ?? [];
+    emit();
+  }, [emit]);
+
   const reset = useCallback(() => {
     clearTimeout(restoreTimer.current);
-    lists.current = { drawnExcludes: [], brushRestores: [], segExcludes: [], segRestores: [] };
+    lists.current = {
+      drawnExcludes: [], brushRestores: [],
+      segExcludes: [], segRestores: [],
+      userRegionExcludes: [], userRegionRestores: [],
+    };
   }, []);
 
   useEffect(() => () => clearTimeout(restoreTimer.current), []);
 
-  return { addExclude, restoreAt, setSegmentOverrides, reset };
+  return { addExclude, restoreAt, setSegmentOverrides, setUserRegions, reset };
 }

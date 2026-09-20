@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "../../styles/segments.css";
 import "../../styles/drawTools.css";
-import { LAYER_COLORS, LAYER_LABELS } from "../../layerColors.js";
+import { LAYER_COLORS, LAYER_LABELS } from "../../map/layerColors.js";
 import { ANALYSIS_LAYER_IDS } from "../../map/constants.js";
 
 import { useMapInstance } from "../../map/useMapInstance.js";
@@ -16,6 +16,7 @@ import { linesToArea } from "../../features/selection/selectionApi.js";
 import { useAdjustments } from "../../features/analysis/useAdjustments.js";
 import { useSegmentOverrides } from "../../features/segments/useSegmentOverrides.js";
 import { useSegmentInteractions } from "../../features/segments/useSegmentInteractions.js";
+import { useUserRegions } from "../../features/segments/useUserRegions.js";
 
 import MapSearchBox from "./MapSearchBox.jsx";
 import BasemapSwitcher from "./BasemapSwitcher.jsx";
@@ -45,6 +46,11 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
   const hasResultRef = useRef(false);
   hasResultRef.current = Boolean(result);
 
+  // Always-current ref to the parcel geometry so useDrawTool can detect
+  // whether a newly drawn shape falls inside the selected land.
+  const parcelGeometryRef = useRef(null);
+  parcelGeometryRef.current = result?.geometry?.parcel ?? null;
+
   const [tool, setTool] = useState("polygon");
   const [brushColor, setBrushColor] = useState("#ffd60a");
   const presenting = tool === "laser" || tool === "brush";
@@ -64,18 +70,26 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
 
   const adjustments = useAdjustments({ onAdjustment, restoreBrushFt });
   const { overrides, toggle, undo, clearAll, reset: resetOverrides } = useSegmentOverrides(adjustments.setSegmentOverrides);
+  const { regions: userRegions, addRegion, cycleMode: cycleUserRegionMode, removeRegion, reset: resetUserRegions } = useUserRegions(adjustments.setUserRegions);
   const resetAdjustments = adjustments.reset;
 
   // Hook order = layer stacking order: parcels < analysis + segments < pending selection < sketch.
   const { zoomedOut } = useViewportParcels(mapRef, ready);
-  useAnalysisLayers(mapRef, ready, { result, overrides, visibility: layerVisibility });
+  useAnalysisLayers(mapRef, ready, { result, overrides, visibility: layerVisibility, userRegions });
   const { hasPending, resetDraw, submitShape } = useDrawTool(mapRef, ready, {
     tool,
     hasResultRef,
+    parcelGeometryRef,
     onAreaSelected: (geometry) => {
-      resetOverrides();   // segment ids belong to one analysis
-      resetAdjustments(); // a new area starts from a clean slate
+      resetOverrides();    // segment ids belong to one analysis
+      resetUserRegions();  // user regions belong to one selection
+      resetAdjustments();  // a new area starts from a clean slate
       onAreaSelected?.(geometry);
+    },
+    onSubSelect: (geometry) => {
+      // Estimate acres client-side (rough, good enough for the panel label).
+      // The backend will use the real geometry for analysis.
+      addRegion(geometry, null);
     },
     onExclude: adjustments.addExclude,
     onError,
@@ -88,12 +102,14 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
     result,
     onToggleSegment: (key, segment) => !presenting && toggle(key, segment),
     onRestoreAt: (lngLat) => !presenting && hasResultRef.current && adjustments.restoreAt(lngLat),
+    onCycleUserRegion: (id) => !presenting && cycleUserRegionMode(id),
   });
 
   // "New selection" clears the result -> drop every manual edit and pending shape.
   useEffect(() => {
     if (!result) {
       resetOverrides();
+      resetUserRegions();
       resetAdjustments();
       resetDraw();
       sketch.clearAll();
@@ -108,7 +124,7 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
   let hint = TOOL_HINTS[tool];
   if (SHAPE_TOOLS.has(tool)) {
     if (hasPending) hint = 'Click "Calculate Buildable Area" to analyze the selected land.';
-    else if (result) hint = "Shapes you draw now are excluded. Right-click a highlighted piece to flip it, or other excluded (red) land to restore a small area.";
+    else if (result) hint = "Draw inside your land to mark a custom region (right-click to set buildable/non-buildable). Draw outside to exclude that area. Right-click a highlighted segment to flip it.";
   }
 
   return (
@@ -153,7 +169,7 @@ export default function MapView({ result, onAdjustment, onAreaSelected, layerVis
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
       <canvas ref={inkCanvasRef} className="ink-canvas" />
 
-      {result && <SegmentOverridePanel overrides={overrides} onUndo={undo} onClearAll={clearAll} />}
+      {result && <SegmentOverridePanel overrides={overrides} onUndo={undo} onClearAll={clearAll} userRegions={userRegions} onRemoveRegion={removeRegion} />}
       <SegmentHoverTag hovered={hovered} overrides={overrides} />
     </div>
   );

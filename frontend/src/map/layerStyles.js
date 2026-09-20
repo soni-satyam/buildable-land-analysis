@@ -1,4 +1,4 @@
-import { LAYER_COLORS, LAYER_LABELS } from "../layerColors.js";
+import { LAYER_COLORS, LAYER_LABELS } from "./layerColors.js";
 
 // Fallbacks only; colours and labels come from src/layerColors.js so the
 // sidebar legend and the map can't drift apart.

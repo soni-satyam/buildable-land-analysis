@@ -8,8 +8,8 @@ import {
   TerraDrawSelectMode,
 } from "terra-draw";
 import { TerraDrawMapLibreGLAdapter } from "terra-draw-maplibre-gl-adapter";
-import { EMPTY_FEATURE } from "./constants.js";
-import { polygonCentroid } from "./geometryUtils.js";
+import { EMPTY_FEATURE, EMPTY_FC } from "./constants.js";
+import { polygonCentroid, geometryInsideParcel } from "./geometryUtils.js";
 
 // Tools terra-draw handles. Every other tool (line, freehand, pan, laser,
 // brush) parks terra-draw in "select" mode: it's registered, and has nothing
@@ -23,18 +23,25 @@ const modeFor = (tool) => MODE_FOR_TOOL[tool] ?? "select";
  * "a shape was completed" path used by every selection tool:
  *
  *   submitShape(geometry)
- *     - no result yet -> becomes the pending area (confirm button, onAreaSelected)
- *     - result exists -> an additional exclude (onExclude), applied immediately
+ *     - no result yet      -> pending area (confirm button, onAreaSelected)
+ *     - result, inside parcel  -> sub-selection (onSubSelect), shown gold/dashed
+ *     - result, outside parcel -> exclude (onExclude), shown red/dashed
  *
- * Callbacks are read through a ref so they never go stale.
+ * All post-analysis shapes are kept visible in a "drawn-shapes" source so
+ * users can see what they drew — terra-draw removes them from its own layer
+ * immediately, so without this they would vanish the moment the shape closed.
  */
-export function useDrawTool(mapRef, ready, { tool, hasResultRef, onAreaSelected, onExclude, onError }) {
+export function useDrawTool(mapRef, ready, { tool, hasResultRef, parcelGeometryRef, onAreaSelected, onSubSelect, onExclude, onError }) {
   const drawRef = useRef(null);
   const confirmMarkerRef = useRef(null);
   const [hasPending, setHasPending] = useState(false);
 
+  // Persistent list of all drawn shapes shown after a result exists.
+  // Each entry: { id, geometry, kind: "subselect" | "exclude" }
+  const drawnShapesRef = useRef([]);
+
   const cbRef = useRef({});
-  cbRef.current = { onAreaSelected, onExclude, onError, tool };
+  cbRef.current = { onAreaSelected, onSubSelect, onExclude, onError, tool };
 
   function clearPendingSelection() {
     const map = mapRef.current;
@@ -42,6 +49,30 @@ export function useDrawTool(mapRef, ready, { tool, hasResultRef, onAreaSelected,
     confirmMarkerRef.current?.remove();
     confirmMarkerRef.current = null;
     setHasPending(false);
+  }
+
+  function updateDrawnShapesSource() {
+    const map = mapRef.current;
+    if (!map?.getSource("drawn-shapes")) return;
+    map.getSource("drawn-shapes").setData({
+      type: "FeatureCollection",
+      features: drawnShapesRef.current.map((s) => ({
+        type: "Feature",
+        geometry: s.geometry,
+        properties: { kind: s.kind },
+      })),
+    });
+  }
+
+  function addDrawnShape(geometry, kind) {
+    const id = `drawn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    drawnShapesRef.current = [...drawnShapesRef.current, { id, geometry, kind }];
+    updateDrawnShapesSource();
+  }
+
+  function clearDrawnShapes() {
+    drawnShapesRef.current = [];
+    updateDrawnShapesSource();
   }
 
   function showConfirmButton(map, geometry) {
@@ -63,11 +94,21 @@ export function useDrawTool(mapRef, ready, { tool, hasResultRef, onAreaSelected,
     const map = mapRef.current;
     if (!map || !geometry) return;
     if (!hasResultRef.current) {
+      // First selection — show pending outline + confirm button.
       map.getSource("pending-selection")?.setData({ type: "Feature", geometry, properties: {} });
       setHasPending(true);
       showConfirmButton(map, geometry);
     } else {
-      cbRef.current.onExclude?.(geometry);
+      // Post-analysis draw — detect inside/outside parcel and route accordingly.
+      const parcelGeom = parcelGeometryRef?.current;
+      const isInside = parcelGeom && geometryInsideParcel(geometry, parcelGeom);
+      if (isInside) {
+        addDrawnShape(geometry, "subselect");
+        cbRef.current.onSubSelect?.(geometry);
+      } else {
+        addDrawnShape(geometry, "exclude");
+        cbRef.current.onExclude?.(geometry);
+      }
     }
   }
 
@@ -75,9 +116,29 @@ export function useDrawTool(mapRef, ready, { tool, hasResultRef, onAreaSelected,
     if (!ready) return;
     const map = mapRef.current;
 
+    // Pending selection (before confirm).
     map.addSource("pending-selection", { type: "geojson", data: EMPTY_FEATURE });
     map.addLayer({ id: "pending-selection-fill", type: "fill", source: "pending-selection", paint: { "fill-color": "#c99a46", "fill-opacity": 0.15 } });
     map.addLayer({ id: "pending-selection-outline", type: "line", source: "pending-selection", paint: { "line-color": "#c99a46", "line-width": 2, "line-dasharray": [2, 2] } });
+
+    // Persistent drawn shapes shown after analysis result exists.
+    // kind="subselect" → gold dashed; kind="exclude" → red dashed.
+    map.addSource("drawn-shapes", { type: "geojson", data: EMPTY_FC });
+    map.addLayer({
+      id: "drawn-shapes-fill", type: "fill", source: "drawn-shapes",
+      paint: {
+        "fill-color": ["match", ["get", "kind"], "subselect", "#c99a46", "#e74c3c"],
+        "fill-opacity": 0.12,
+      },
+    });
+    map.addLayer({
+      id: "drawn-shapes-outline", type: "line", source: "drawn-shapes",
+      paint: {
+        "line-color": ["match", ["get", "kind"], "subselect", "#c99a46", "#e74c3c"],
+        "line-width": 2,
+        "line-dasharray": [3, 2],
+      },
+    });
 
     let draw;
     try {
@@ -124,6 +185,7 @@ export function useDrawTool(mapRef, ready, { tool, hasResultRef, onAreaSelected,
 
   function resetDraw() {
     clearPendingSelection();
+    clearDrawnShapes();
     drawRef.current?.clear();
   }
 

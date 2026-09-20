@@ -54,6 +54,36 @@ export function geometryBounds(geometry) {
   return [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
 }
 
+/**
+ * Ray-casting point-in-polygon for a single outer ring (lon/lat coords).
+ * Used to decide whether a newly drawn shape centroid falls inside the
+ * currently selected parcel → sub-selection rather than a new area.
+ */
+export function pointInRing(point, ring) {
+  const [px, py] = point;
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Returns true if the centroid of `geometry` falls inside any ring of `parcelGeometry`.
+ * Works for Polygon and MultiPolygon parcels.
+ */
+export function geometryInsideParcel(geometry, parcelGeometry) {
+  if (!parcelGeometry || !geometry) return false;
+  const centroid = polygonCentroid(geometry);
+  const rings =
+    parcelGeometry.type === "MultiPolygon"
+      ? parcelGeometry.coordinates.map((p) => p[0])
+      : [parcelGeometry.coordinates[0]];
+  return rings.some((ring) => pointInRing(centroid, ring));
+}
+
 /** Accepts a bare geometry, a Feature, a FeatureCollection, or null. */
 export function toFeature(g) {
   if (!g) return EMPTY_FEATURE;

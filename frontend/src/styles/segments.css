@@ -39,3 +39,12 @@
 }
 .segment-hover-tag small { grid-column: 1 / -1; opacity: 0.75; }
 .segment-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; align-self: center; }
+
+.segment-panel-section-title {
+  margin: 8px 0 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}

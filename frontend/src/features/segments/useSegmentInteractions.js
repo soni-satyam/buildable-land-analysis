@@ -13,9 +13,9 @@ import { SEGMENT_FILL_LAYER_IDS } from "../../map/constants.js";
  * The full geometry is looked up from `result.segments` rather than read
  * off the rendered feature, because rendered features are clipped to tiles.
  */
-export function useSegmentInteractions(mapRef, ready, { result, onToggleSegment, onRestoreAt }) {
+export function useSegmentInteractions(mapRef, ready, { result, onToggleSegment, onRestoreAt, onCycleUserRegion }) {
   const latest = useRef({});
-  latest.current = { result, onToggleSegment, onRestoreAt };
+  latest.current = { result, onToggleSegment, onRestoreAt, onCycleUserRegion };
   const [hovered, setHovered] = useState(null);
 
   useEffect(() => {
@@ -24,14 +24,24 @@ export function useSegmentInteractions(mapRef, ready, { result, onToggleSegment,
     const canvas = map.getCanvas();
     let active = null; // { source, id } currently hovered
 
-    const hitTest = (point) => {
+    const hitTestSegments = (point) => {
       const layers = SEGMENT_FILL_LAYER_IDS.filter((id) => map.getLayer(id));
       if (!layers.length) return null;
-      const f = map.queryRenderedFeatures(point, { layers })[0]; // topmost first
+      const f = map.queryRenderedFeatures(point, { layers })[0];
       if (!f) return null;
       const { id, layerKey, acres } = f.properties;
-      return { source: f.source, id, layerKey, acres };
+      return { source: f.source, id, layerKey, acres, kind: "segment" };
     };
+
+    const hitTestUserRegion = (point) => {
+      if (!map.getLayer("user-regions-fill")) return null;
+      const f = map.queryRenderedFeatures(point, { layers: ["user-regions-fill"] })[0];
+      if (!f) return null;
+      const { id, mode, acres } = f.properties;
+      return { source: "user-regions", id, layerKey: "user-region", mode, acres, kind: "userRegion" };
+    };
+
+    const hitTest = (point) => hitTestUserRegion(point) || hitTestSegments(point);
 
     const setHover = (hit) => {
       if (active?.id === hit?.id && active?.source === hit?.source) return;
@@ -42,7 +52,7 @@ export function useSegmentInteractions(mapRef, ready, { result, onToggleSegment,
         /* source may be gone during teardown */
       }
       active = hit ? { source: hit.source, id: hit.id } : null;
-      setHovered(hit ? { id: hit.id, layerKey: hit.layerKey, acres: hit.acres } : null);
+      setHovered(hit ? { id: hit.id, layerKey: hit.layerKey, acres: hit.acres, kind: hit.kind, mode: hit.mode } : null);
     };
 
     const onMove = (e) => setHover(hitTest(e.point));
@@ -51,8 +61,14 @@ export function useSegmentInteractions(mapRef, ready, { result, onToggleSegment,
     const onContextMenu = (e) => {
       e.originalEvent?.preventDefault?.();
       const hit = hitTest(e.point);
-      const { result, onToggleSegment, onRestoreAt } = latest.current;
-      if (hit) {
+      const { result, onToggleSegment, onRestoreAt, onCycleUserRegion } = latest.current;
+
+      if (hit?.kind === "userRegion") {
+        onCycleUserRegion?.(hit.id);
+        return;
+      }
+
+      if (hit?.kind === "segment") {
         const segment = result?.segments?.[hit.layerKey]?.find((s) => s.id === hit.id);
         if (segment) {
           onToggleSegment?.(hit.layerKey, segment);

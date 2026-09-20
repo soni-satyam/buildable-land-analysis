@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef } from "react";
-import MapView from "./components/map/MapDraw.jsx";
+import MapView from "./components/map/Mapdraw.jsx";
 import { LAYER_COLORS, LAYER_LABELS } from "./map/layerColors.js";
 import { analyzeArea } from "./features/analysis/analysisApi.js";
 

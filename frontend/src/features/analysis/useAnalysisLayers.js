@@ -34,7 +34,9 @@ const SEGMENT_COLOR = [
  *  3. fits the map to the parcel - only when the parcel itself changes, so
  *     flipping a piece or moving a slider doesn't yank the camera away.
  */
-export function useAnalysisLayers(mapRef, ready, { result, overrides = NO_OVERRIDES, visibility = ALL_VISIBLE }) {
+const NO_REGIONS = [];
+
+export function useAnalysisLayers(mapRef, ready, { result, overrides = NO_OVERRIDES, visibility = ALL_VISIBLE, userRegions = NO_REGIONS }) {
   const lastFit = useRef(null);
 
   useEffect(() => {
@@ -47,6 +49,39 @@ export function useAnalysisLayers(mapRef, ready, { result, overrides = NO_OVERRI
       map.addLayer({ id, type: "fill", source: id, paint: { "fill-color": color, "fill-opacity": 0.45 } });
       map.addLayer({ id: `${id}-outline`, type: "line", source: id, paint: { "line-color": color, "line-width": 1.5 } });
     }
+
+    // User-drawn sub-selection regions (neutral / buildable / nonbuildable).
+    // Rendered above everything else so they're always clickable.
+    map.addSource("user-regions", { type: "geojson", data: EMPTY_FC, promoteId: "id" });
+    map.addLayer({
+      id: "user-regions-fill", type: "fill", source: "user-regions",
+      paint: {
+        "fill-color": [
+          "match", ["get", "mode"],
+          "buildable", "#2ecc71",
+          "nonbuildable", "#e74c3c",
+          "#c99a46",
+        ],
+        "fill-opacity": [
+          "case",
+          ["boolean", ["feature-state", "hover"], false], 0.45,
+          ["match", ["get", "mode"], ["buildable", "nonbuildable"], 0.30, 0.10],
+        ],
+      },
+    });
+    map.addLayer({
+      id: "user-regions-outline", type: "line", source: "user-regions",
+      paint: {
+        "line-color": [
+          "match", ["get", "mode"],
+          "buildable", "#2ecc71",
+          "nonbuildable", "#e74c3c",
+          "#c99a46",
+        ],
+        "line-width": ["case", ["boolean", ["feature-state", "hover"], false], 3, 2],
+        "line-dasharray": [3, 2],
+      },
+    });
 
     // Reversed so "buildable" sits underneath and constraints on top.
     for (const key of [...SEGMENT_LAYER_KEYS].reverse()) {
@@ -97,6 +132,22 @@ export function useAnalysisLayers(mapRef, ready, { result, overrides = NO_OVERRI
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, result, overrides]);
+
+  // User-drawn regions: update whenever the list or any mode changes.
+  useEffect(() => {
+    if (!ready) return;
+    const map = mapRef.current;
+    map.getSource("user-regions")?.setData({
+      type: "FeatureCollection",
+      features: userRegions.map((r) => ({
+        type: "Feature",
+        id: r.id, // needed for setFeatureState hover
+        geometry: r.geometry,
+        properties: { id: r.id, mode: r.mode ?? "none", acres: r.acres ?? 0 },
+      })),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, userRegions]);
 
   // Fit to the parcel only when it actually changed.
   useEffect(() => {
