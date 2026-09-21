@@ -13,11 +13,12 @@ import { BASEMAPS, HARRIS_COUNTY_CENTER } from "./constants.js";
  * sources/layers/listeners, so init order is deterministic regardless of
  * hook call order.
  */
-export function useMapInstance(containerRef) {
+export function useMapInstance(containerRef, { initialBasemap = "streets", initialView = null } = {}) {
+  const startBasemap = BASEMAPS[initialBasemap] ? initialBasemap : "streets";
   const mapRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [mapError, setMapError] = useState(null);
-  const [basemap, setBasemapKey] = useState("streets");
+  const [basemap, setBasemapKey] = useState(startBasemap);
 
   const applyBasemap = useCallback((map, key) => {
     const def = BASEMAPS[key] || BASEMAPS.streets;
@@ -42,8 +43,11 @@ export function useMapInstance(containerRef) {
       map = new maplibregl.Map({
         container: containerRef.current,
         style: { version: 8, sources: {}, layers: [] },
-        center: HARRIS_COUNTY_CENTER,
-        zoom: 15,
+        center: initialView?.center ?? HARRIS_COUNTY_CENTER,
+        zoom: initialView?.zoom ?? 15,
+        bearing: initialView?.bearing ?? 0,
+        pitch: initialView?.pitch ?? 0,
+        attributionControl: false,
       });
       mapRef.current = map;
     } catch (e) {
@@ -53,9 +57,10 @@ export function useMapInstance(containerRef) {
     }
 
     map.on("error", (e) => console.error("MapLibre error:", e?.error || e));
-    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    map.addControl(new maplibregl.NavigationControl(), "bottom-right");
+    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
     map.on("load", () => {
-      applyBasemap(map, "streets");
+      applyBasemap(map, startBasemap);
       setReady(true);
     });
 

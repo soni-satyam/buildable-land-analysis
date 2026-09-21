@@ -1,28 +1,35 @@
 export default function MapSearchBox({ query, onQueryChange, results, searching, onSubmit, onPick, onReset }) {
-  return (
-    <>
-      <div className="map-topbar">
-        <form className="search-box" onSubmit={onSubmit}>
-          <input
-            type="text"
-            placeholder="Search for a place or address…"
-            value={query}
-            onChange={(e) => onQueryChange(e.target.value)}
-          />
-          <button type="submit" disabled={searching}>{searching ? "…" : "Search"}</button>
-        </form>
-        <button className="reset-btn" onClick={onReset} type="button">
-          Reset to Harris County
-        </button>
-      </div>
+  const open = results.length > 0;
 
-      {results.length > 0 && (
-        <div className="search-results">
-          {results.map((r, i) => (
-            <button key={i} onClick={() => onPick(r)} type="button">{r.display_name}</button>
-          ))}
+  return (
+    <div className="center-strip map-topbar">
+      <div className="map-topbar-inner">
+        <div className="search-wrap">
+          <form className={`search-box${open ? " open" : ""}`} onSubmit={onSubmit}>
+            <input
+              type="text"
+              placeholder="Search place or address…"
+              value={query}
+              onChange={(e) => onQueryChange(e.target.value)}
+              autoComplete="off"
+            />
+            <button type="submit" disabled={searching}>{searching ? "…" : "Search"}</button>
+          </form>
+
+          {open && (
+            <div className="search-results">
+              {results.map((r, i) => (
+                <button key={i} onClick={() => onPick(r)} type="button">
+                  <span className="sr-title">{r.title || r.display_name}</span>
+                  {r.subtitle && <span className="sr-sub">{r.subtitle}</span>}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      )}
-    </>
+
+        <button className="reset-btn" onClick={onReset} type="button">Reset view</button>
+      </div>
+    </div>
   );
 }

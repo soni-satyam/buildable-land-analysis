@@ -71,6 +71,7 @@ export function useAdjustments({ onAdjustment, restoreBrushFt }) {
   }, []);
 
   useEffect(() => () => clearTimeout(restoreTimer.current), []);
+  const listsRef = lists;
 
-  return { addExclude, restoreAt, setSegmentOverrides, setUserRegions, restoreDrawnAndBrush, getLists, reset };
+  return { addExclude, listsRef, restoreAt, setSegmentOverrides, setUserRegions, restoreDrawnAndBrush, getLists, reset };
 }

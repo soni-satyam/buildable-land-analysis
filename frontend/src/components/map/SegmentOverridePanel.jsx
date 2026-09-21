@@ -10,7 +10,7 @@ export default function SegmentOverridePanel({ overrides, onUndo, onClearAll, us
   const hasAnything = overrideItems.length > 0 || regionItems.length > 0;
 
   return (
-    <aside className="segment-panel" aria-label="Land pieces">
+    <section className="rp-section land-pieces" aria-label="Land pieces">
       <h3>Land pieces</h3>
 
       {!hasAnything && (
@@ -55,6 +55,6 @@ export default function SegmentOverridePanel({ overrides, onUndo, onClearAll, us
           <button type="button" className="segment-panel-clear" onClick={onClearAll}>Undo all segment changes</button>
         </>
       )}
-    </aside>
+    </section>
   );
 }

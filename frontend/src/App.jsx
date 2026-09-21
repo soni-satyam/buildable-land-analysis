@@ -1,88 +1,107 @@
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
+import HistoryList from "./components/HistoryList.jsx";
 import MapView from "./components/map/Mapdraw.jsx";
 import { LAYER_COLORS, LAYER_LABELS } from "./map/layerColors.js";
 import { analyzeArea } from "./features/analysis/analysisApi.js";
+import {
+  loadPrefs, loadSession, readSession, replaceSession, saveSession, clearSession,
+  patchPrefs, archiveSession, loadHistory, removeHistoryEntry, clearHistory,
+} from "./features/persistence/sessionStore.js";
 
 const LAYER_TOGGLES = [
-  { id: "parcel", label: "Parcel boundary" },
-  { id: "buildable", label: "Buildable area" },
-  { id: "excluded", label: "Excluded (all constraints)" },
-  { id: "wetlands", label: "Wetlands" },
-  { id: "fema_flood", label: "FEMA flood zones" },
-  { id: "buildings", label: "Building footprints/buffers" },
+  { id: "parcel",       label: "Parcel boundary" },
+  { id: "buildable",    label: "Buildable area" },
+  { id: "excluded",     label: "Excluded (constraints)" },
+  { id: "wetlands",     label: "Wetlands" },
+  { id: "fema_flood",   label: "FEMA flood zones" },
+  { id: "buildings",    label: "Building footprints/buffers" },
   { id: "transmission", label: "Transmission lines" },
 ];
 
+const SLIDERS = [
+  { key: "wetland_buffer_ft",      label: "Wetland buffer",      min: 0, max: 300, step: 5 },
+  { key: "building_setback_ft",    label: "Building setback",    min: 0, max: 300, step: 5 },
+  { key: "transmission_buffer_ft", label: "Transmission buffer", min: 0, max: 400, step: 10 },
+];
+
+const PANEL_MIN = 280;
+const PANEL_DEFAULT = 340;
+
+const DEFAULT_SETTINGS = {
+  wetland_buffer_ft: 50, building_setback_ft: 50, transmission_buffer_ft: 100,
+  exclude_sfha: true, restore_brush_ft: 60,
+};
+
+// Read once at page load. An expired session is moved to History here.
+const BOOT = { prefs: loadPrefs(), session: loadSession() };
+
 export default function App() {
-  const [result, setResult] = useState(null);
+  const [result, setResult]   = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [settings, setSettings] = useState({
-    wetland_buffer_ft: 50,
-    building_setback_ft: 50,
-    transmission_buffer_ft: 100,
-    exclude_sfha: true,
-    restore_brush_ft: 60,
+  const [error, setError]     = useState(null);
+  const [panelW, setPanelW] = useState(() => Math.max(PANEL_MIN, Math.min(620, BOOT.prefs.panelW ?? PANEL_DEFAULT)));
+  const [segmentSlot, setSegmentSlot] = useState(null); // portal target for "Land pieces"
+  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ...BOOT.prefs.settings });
+  const [dockOpen, setDockOpen] = useState(BOOT.prefs.dockOpen ?? true);
+  const [historyList, setHistoryList] = useState(loadHistory);
+  const [restoreRequest, setRestoreRequest] = useState(
+    BOOT.session ? { session: BOOT.session, boot: true, nonce: 0 } : null,
+  );
+  const [layerVisibility, setLayerVisibility] = useState({
+    ...Object.fromEntries(LAYER_TOGGLES.map((l) => [l.id, true])),
+    ...BOOT.prefs.layerVisibility,
   });
-  const [layerVisibility, setLayerVisibility] = useState(
-    Object.fromEntries(LAYER_TOGGLES.map((l) => [l.id, true]))
-  );
-  const selectionRef = useRef(null);
-  const adjustmentRef = useRef({});
-    // Guards against out-of-order responses: if the user tweaks a slider
-  // twice quickly, two requests can be in flight at once, and the older
-  // one isn't guaranteed to resolve first. Without this, a slow stale
-  // response arriving after a newer one could silently overwrite the
-  // fresher result - looking exactly like "the map stopped updating".
-  const requestIdRef = useRef(0);
+  const selectionRef = useRef(BOOT.session?.selection ?? null);   // was useRef(null)
+  const adjustTimerRef = useRef(null);
+  const runAnalyzeRef = useRef(null);
+  const adjustmentRef   = useRef({});
+  const requestIdRef    = useRef(0);
+  const analyzeTimerRef = useRef(null);
+  const draggingRef     = useRef(false);
 
-  const runAnalyze = useCallback(
-    async (target, extra = {}) => {
-      if (!target) return;
-      const thisRequestId = ++requestIdRef.current;
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await analyzeArea({
-          ...target,
-          ...settings,
-          ...adjustmentRef.current,
-          ...extra,
-        });
-        if (thisRequestId !== requestIdRef.current) return; // a newer request superseded this one
-        setResult(data);
-      } catch (e) {
-        if (thisRequestId !== requestIdRef.current) return;
-        setError(e.message);
-      } finally {
-        if (thisRequestId === requestIdRef.current) setLoading(false);
-      }
-    },
-    [settings]
-  );
+  const runAnalyze = useCallback(async (target, extra = {}) => {
+    if (!target) return;
+    const id = ++requestIdRef.current;
+    setLoading(true); setError(null);
+    try {
+      const data = await analyzeArea({ ...target, ...settings, ...adjustmentRef.current, ...extra });
+      if (id !== requestIdRef.current) return;
+      setResult(data);
+    } catch (e) {
+      if (id !== requestIdRef.current) return;
+      setError(e.message);
+    } finally {
+      if (id === requestIdRef.current) setLoading(false);
+    }
+  }, [settings]);
 
+  runAnalyzeRef.current = runAnalyze;
+
+  
 
   function handleAreaSelected(geometry) {
     adjustmentRef.current = {};
-    selectionRef.current = { custom_geometry: geometry };
+    selectionRef.current  = { custom_geometry: geometry };
+    replaceSession({ selection: selectionRef.current });
     runAnalyze(selectionRef.current);
   }
-
-  function handleAdjustment(adjustment) {
+  function handleAdjustment(adj) {
     if (!selectionRef.current) return;
-    adjustmentRef.current = adjustment; // MapView sends the FULL arrays each time
-    runAnalyze(selectionRef.current, adjustment);
+    adjustmentRef.current = adj;
+    setLoading(true);
+    clearTimeout(adjustTimerRef.current);
+    adjustTimerRef.current = setTimeout(() => {
+      runAnalyzeRef.current?.(selectionRef.current, adj);
+    }, 120);
   }
-
   function startNewSelection() {
-    selectionRef.current = null;
-    adjustmentRef.current = {};
-    setResult(null);
-    setError(null);
+    const current = readSession();
+    if (current?.selection) { archiveSession(current, "replaced"); setHistoryList(loadHistory()); }
+    clearSession();
+    clearTimeout(adjustTimerRef.current);
+    selectionRef.current = null; adjustmentRef.current = {};
+    setResult(null); setError(null);
   }
-
-  const analyzeTimerRef = useRef(null);
-
   function updateSetting(key, value) {
     setSettings((s) => ({ ...s, [key]: value }));
     if (!selectionRef.current) return;
@@ -91,188 +110,278 @@ export default function App() {
       runAnalyze(selectionRef.current, { [key]: value });
     }, 300);
   }
-
   function toggleLayer(id) {
     setLayerVisibility((v) => ({ ...v, [id]: !v[id] }));
   }
 
+  function restoreFromHistory(id) {
+    const entry = loadHistory().find((e) => e.id === id);
+    if (!entry) return;
+    const current = readSession();
+    if (current?.selection) archiveSession(current, "replaced");   // don't lose what's open now
+    removeHistoryEntry(id);
+
+    clearTimeout(analyzeTimerRef.current);
+    clearTimeout(adjustTimerRef.current);
+    requestIdRef.current += 1;                    // drop any analysis still in flight
+    selectionRef.current = entry.session.selection;
+    adjustmentRef.current = {};
+    replaceSession(entry.session);
+    setResult(null);
+    setLoading(true);
+    setError(null);
+    setRestoreRequest((r) => ({ session: entry.session, boot: false, nonce: (r?.nonce ?? 0) + 1 }));
+    setHistoryList(loadHistory());
+  }
+  function deleteHistory(id) { removeHistoryEntry(id); setHistoryList(loadHistory()); }
+  function clearAllHistory() { clearHistory(); setHistoryList([]); }
+
+  useEffect(() => {
+    patchPrefs({ settings, layerVisibility, panelW, dockOpen });
+  }, [settings, layerVisibility, panelW, dockOpen]);
+
+  useEffect(() => {
+    if (result) saveSession({ summary: { parcel_acres: result.parcel_acres, buildable_acres: result.buildable_acres } });
+  }, [result]);
+
+  // ── Resizable right panel ──
+  function onHandleDown(e) {
+    draggingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+  function onHandleMove(e) {
+    if (!draggingRef.current) return;
+    const max = Math.min(620, Math.round(window.innerWidth * 0.5));
+    setPanelW(Math.max(PANEL_MIN, Math.min(max, window.innerWidth - e.clientX)));
+  }
+  function onHandleUp(e) {
+    draggingRef.current = false;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+  }
+
+  const totalExcluded = result
+    ? Math.max(...(result.breakdown?.map((b) => parseFloat(b.acres_removed)) ?? [1]), 1)
+    : 1;
+
+  const buildableRatio = result
+    ? Math.min(100, (parseFloat(result.buildable_acres) / parseFloat(result.parcel_acres)) * 100)
+    : 0;
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <p className="eyebrow">HARRIS COUNTY, TX — FIPS 48201</p>
-          <h1>Buildable Land Analysis</h1>
-          <p>Search a location or click a parcel on the map to see its estimated buildable area.</p>
-        </div>
-
-        <div className="section">
-          <p className="section-title">SELECTED AREA</p>
-          {result ? (
-            <>
-              <p className="empty-state">
-                {result.parcel_id ? (
-                  <>Prop_ID <strong style={{ color: "var(--brass)" }}>{result.parcel_id}</strong></>
-                ) : (
-                  "Custom drawn area"
-                )}
-                {loading ? " — recalculating…" : ""}
-              </p>
-              <button type="button" className="new-selection-link" onClick={startNewSelection}>
-                ← New selection
-              </button>
-            </>
-
-          ) : (
-            <p className="empty-state">
-              Click points on the map to draw an area, then click "Calculate Buildable Area" on the shape.
-            </p>
-          )}
-          {error && <p style={{ color: "#b95d40", fontSize: 12.5, marginTop: 10, lineHeight: 1.5 }}>{error}</p>}
-        </div>
-
-        <div className="section">
-          <p className="section-title">SETBACKS — SCREENING ASSUMPTIONS</p>
-
-          <div className="setback-row">
-            <div className="setback-row-head">
-              <span>Wetland buffer</span>
-              <span className="setback-value">{settings.wetland_buffer_ft} ft</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="300"
-              step="5"
-              value={settings.wetland_buffer_ft}
-              onChange={(e) => updateSetting("wetland_buffer_ft", Number(e.target.value))}
-            />
-          </div>
-
-          <div className="setback-row">
-            <div className="setback-row-head">
-              <span>Building setback</span>
-              <span className="setback-value">{settings.building_setback_ft} ft</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="300"
-              step="5"
-              value={settings.building_setback_ft}
-              onChange={(e) => updateSetting("building_setback_ft", Number(e.target.value))}
-            />
-          </div>
-
-          <div className="setback-row">
-            <div className="setback-row-head">
-              <span>Transmission buffer</span>
-              <span className="setback-value">{settings.transmission_buffer_ft} ft</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="400"
-              step="10"
-              value={settings.transmission_buffer_ft}
-              onChange={(e) => updateSetting("transmission_buffer_ft", Number(e.target.value))}
-            />
-          </div>
-
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={settings.exclude_sfha}
-              onChange={(e) => updateSetting("exclude_sfha", e.target.checked)}
-            />
-            Exclude FEMA Special Flood Hazard Areas
-          </label>
-
-          <div className="setback-row">
-            <div className="setback-row-head">
-              <span>Restore brush radius</span>
-              <span className="setback-value">{settings.restore_brush_ft} ft</span>
-            </div>
-            <input
-              type="range"
-              min="10"
-              max="200"
-              step="10"
-              value={settings.restore_brush_ft}
-              onChange={(e) => setSettings((s) => ({ ...s, restore_brush_ft: Number(e.target.value) }))}
-            />
-            <p className="field-hint">Right-click excluded (red) land on the map to mark this much of it buildable again.</p>
-          </div>
-        </div>
-
-        <div className="section">
-          <p className="section-title">ANALYSIS LAYERS</p>
-          {LAYER_TOGGLES.map((l) => (
-            <label className="checkbox-row" key={l.id}>
-              <input type="checkbox" checked={layerVisibility[l.id]} onChange={() => toggleLayer(l.id)} />
-              <span className="legend-swatch" style={{ background: LAYER_COLORS[l.id] }} />
-              {l.label}
-            </label>
-          ))}
-        </div>
-
-        {result && (
-          <div className="section">
-            <p className="section-title">RESULT</p>
-            <div className="stat-grid">
-              <div className="stat">
-                 <p className="stat-label">SELECTED</p>
-                <p className="stat-value">{result.parcel_acres}<span className="stat-unit">ac</span></p>
-              </div>
-              <div className="stat">
-                <p className="stat-label">EXCLUDED</p>
-                <p className="stat-value">{result.excluded_acres}<span className="stat-unit">ac</span></p>
-              </div>
-              <div className="stat stat-wide">
-                <p className="stat-label">ESTIMATED BUILDABLE</p>
-                <p className="stat-value">{result.buildable_acres}<span className="stat-unit">ac</span></p>
-              </div>
-            </div>
-
-            {result.restored_acres > 0 && (
-            <div className="restore-caution">
-                <p><strong>{result.restored_acres.toFixed(2)} ac</strong> manually marked buildable by you.</p>
-                <p className="restore-caution-warning">⚠ Double-check this override before relying on it.</p>
-              </div>
-            )}
-
-            <p className="section-title">BREAKDOWN BY CONSTRAINT</p>
-            <p className="breakdown-note">
-              Individual values may overlap — they will not sum exactly to the excluded total above.
-            </p>
-            <table className="breakdown-table">
-              <tbody>
-                {result.breakdown.map((b, i) => (
-                  <tr key={i}>
-                    <td>
-                      <span className="legend-swatch" style={{ background: LAYER_COLORS[b.layer] || "#c99a46" }} />
-                      {LAYER_LABELS[b.layer] || b.layer.replace(/_/g, " ")}
-                      {b.buffer_ft ? <span className="breakdown-buffer">+{b.buffer_ft}ft</span> : null}
-                      <div className="breakdown-reason">{b.reason}</div>
-                    </td>
-                    <td>-{b.acres_removed} ac</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <p className="disclosure">{result.note}</p>
-          </div>
-        )}
-      </aside>
-
+    <div className="app-shell" style={{ "--panel-w": `${panelW}px` }}>
       <MapView
         result={result}
         onAdjustment={handleAdjustment}
         onAreaSelected={handleAreaSelected}
         layerVisibility={layerVisibility}
         restoreBrushFt={settings.restore_brush_ft}
-       />
+        segmentSlot={segmentSlot}
+        initial={{ prefs: BOOT.prefs, view: BOOT.session?.view }}
+        restoreRequest={restoreRequest}
+      />
+            {/* Centre-of-map loader: first calculation / restore only */}
+      {loading && !result && (
+        <div className="map-loading" role="status" aria-live="polite">
+          <div className="map-loading-card">
+            <div className="ring" />
+            <p className="map-loading-title">Analysing land…</p>
+            <p className="map-loading-sub">Checking wetlands, flood zones and buildings</p>
+          </div>
+        </div>
+      )}
 
+      {/* ───────── LEFT PANEL: name, setbacks, checkboxes, layers ───────── */}
+      <aside className="left-panel">
+        <div className="rp-header">
+          <p className="rp-eyebrow">HARRIS COUNTY, TX</p>
+          <p className="rp-title">Buildable Land Analysis</p>
+        </div>
+
+        <div className="rp-body">
+          <div className="rp-section">
+            <p className="rp-section-label">Setbacks</p>
+
+            {SLIDERS.map(({ key, label, min, max, step }) => (
+              <div className="rp-slider-row" key={key}>
+                <div className="rp-slider-head">
+                  <span>{label}</span>
+                  <span className="rp-slider-val">{settings[key]} ft</span>
+                </div>
+                <input type="range" min={min} max={max} step={step}
+                  value={settings[key]}
+                  onChange={(e) => updateSetting(key, Number(e.target.value))} />
+              </div>
+            ))}
+
+            <label className="rp-checkbox">
+              <input type="checkbox" checked={settings.exclude_sfha}
+                onChange={(e) => updateSetting("exclude_sfha", e.target.checked)} />
+              Exclude FEMA flood zones
+            </label>
+
+            <div className="rp-slider-row" style={{ marginTop: 12 }}>
+              <div className="rp-slider-head">
+                <span>Restore brush</span>
+                <span className="rp-slider-val">{settings.restore_brush_ft} ft</span>
+              </div>
+              <input type="range" min="10" max="200" step="10"
+                value={settings.restore_brush_ft}
+                onChange={(e) => setSettings((s) => ({ ...s, restore_brush_ft: Number(e.target.value) }))} />
+              <p className="rp-hint">Right-click red land to restore it.</p>
+            </div>
+          </div>
+
+          <div className="rp-section">
+            <p className="rp-section-label">Layers</p>
+            {LAYER_TOGGLES.map((l) => (
+              <label className="rp-layer-row" key={l.id}>
+                <input type="checkbox" checked={layerVisibility[l.id]} onChange={() => toggleLayer(l.id)} />
+                <span className="rp-swatch" style={{ background: LAYER_COLORS[l.id] }} />
+                <span className="rp-layer-label">{l.label}</span>
+              </label>
+            ))}
+          </div>
+          <HistoryList
+              entries={historyList}
+              onRestore={restoreFromHistory}
+              onDelete={deleteHistory}
+              onClear={clearAllHistory}
+          />
+        </div>
+      </aside>
+
+      {/* ───────── RIGHT PANEL: analysis + summary only ───────── */}
+      <aside className="right-panel">
+        <div
+          className="rp-resize"
+          onPointerDown={onHandleDown}
+          onPointerMove={onHandleMove}
+          onPointerUp={onHandleUp}
+          onDoubleClick={() => setPanelW(PANEL_DEFAULT)}
+          title="Drag to resize · double-click to reset"
+        />
+
+        <div className="rp-header">
+          <p className="rp-title">Analysis</p>
+        </div>
+        <div className="rp-body-wrap">
+        <div className="rp-body">
+          <div className="rp-section">
+            <p className="rp-section-label">Selected area</p>
+            {result ? (
+              <div className="rp-selected">
+                <span className="rp-selected-name">
+                  {result.parcel_id
+                    ? <>Prop ID <strong>{result.parcel_id}</strong></>
+                    : "Custom drawn area"}
+                  {loading && <span className="rp-recalc"> · recalculating…</span>}
+                </span>
+                <button className="rp-new-selection" onClick={startNewSelection}>← New selection</button>
+              </div>
+            ) : (
+              <p className="rp-empty">Draw an area on the map, then confirm to analyse it.</p>
+            )}
+            {error && <p className="rp-error">{error}</p>}
+          </div>
+
+          {result && (
+            <>
+              <div className="rp-section rp-stats-section">
+                <div className="rp-stats">
+                  <div className="rp-stat">
+                    <span className="rp-stat-icon">⬡</span>
+                    <span className="rp-stat-label">Selected</span>
+                    <span className="rp-stat-val">{result.parcel_acres} <em>ac</em></span>
+                  </div>
+                  <div className="rp-stat">
+                    <span className="rp-stat-icon" style={{ color: "var(--buildable)" }}>◼</span>
+                    <span className="rp-stat-label">Buildable</span>
+                    <span className="rp-stat-val" style={{ color: "var(--buildable)" }}>{result.buildable_acres} <em>ac</em></span>
+                  </div>
+                  <div className="rp-stat">
+                    <span className="rp-stat-icon rp-ratio-icon">◔</span>
+                    <span className="rp-stat-label">Ratio</span>
+                    <span className="rp-stat-val rp-ratio-val">{buildableRatio.toFixed(1)}%</span>
+                  </div>
+                </div>
+              </div>
+
+              {result.breakdown?.length > 0 && (
+                <div className="rp-section">
+                  <p className="rp-section-label">Breakdown</p>
+                  <p className="rp-note">Values may overlap.</p>
+                  {result.breakdown.map((b, i) => {
+                    const pct = Math.min(100, (parseFloat(b.acres_removed) / totalExcluded) * 100);
+                    return (
+                      <div className="rp-breakdown-row" key={i}>
+                        <div className="rp-breakdown-top">
+                          <span className="rp-breakdown-name">
+                            <span className="rp-swatch" style={{ background: LAYER_COLORS[b.layer] || "#c99a46" }} />
+                            {LAYER_LABELS[b.layer] || b.layer.replace(/_/g, " ")}
+                            {b.buffer_ft ? <span className="rp-buf">+{b.buffer_ft}ft</span> : null}
+                          </span>
+                          <span className="rp-breakdown-acres">−{b.acres_removed} ac</span>
+                          <span className="rp-breakdown-pct">{pct.toFixed(1)}%</span>
+                        </div>
+                        <div className="rp-bar-track">
+                          <div className="rp-bar-fill" style={{ width: `${pct}%`, background: LAYER_COLORS[b.layer] || "#c99a46" }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div className="rp-breakdown-row rp-usable-row">
+                    <div className="rp-breakdown-top">
+                      <span className="rp-breakdown-name">
+                        <span className="rp-swatch" style={{ background: "var(--buildable)" }} />
+                        Usable land
+                      </span>
+                      <span className="rp-breakdown-acres" style={{ color: "var(--buildable)" }}>{result.buildable_acres} ac</span>
+                      <span className="rp-breakdown-pct" style={{ color: "var(--buildable)" }}>{buildableRatio.toFixed(1)}%</span>
+                    </div>
+                    <div className="rp-bar-track">
+                      <div className="rp-bar-fill" style={{ width: `${buildableRatio}%`, background: "var(--buildable)" }} />
+                    </div>
+                  </div>
+
+                  {result.restored_acres > 0 && (
+                    <div className="rp-restore-note">
+                      ⚠ {result.restored_acres.toFixed(2)} ac marked buildable by you — verify before use.
+                    </div>
+                  )}
+                  {result.note && <p className="rp-disclosure">{result.note}</p>}
+                </div>
+              )}
+            </>
+          )}  
+        </div>
+              {/* Centre-of-map loader: first calculation / restore only */}
+          {loading && !result && (
+            <div className="map-loading" role="status" aria-live="polite">
+              <div className="map-loading-card">
+                <div className="ring" />
+                <p className="map-loading-title">Analysing land…</p>
+                <p className="map-loading-sub">Checking wetlands, flood zones and buildings</p>
+              </div>
+            </div>
+          )}
+        </div>
+        {result && (
+          <div className="rp-dock">
+            {/* list expands upward, above the bar */}
+            <div ref={setSegmentSlot} className="rp-dock-body" hidden={!dockOpen} />
+            <button
+              type="button"
+              className="rp-dock-bar"
+              onClick={() => setDockOpen((o) => !o)}
+              aria-expanded={dockOpen}
+            >
+              <span>Land pieces</span>
+              <span className="rp-dock-arrow">{dockOpen ? "▾" : "▴"}</span>
+            </button>
+          </div>
+        )}
+      </aside>
     </div>
   );
 }

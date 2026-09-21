@@ -45,5 +45,12 @@ export function useHistory(onRestore) {
     sync();
   }, [sync]);
 
-  return { push, undo, redo, reset, canUndo: counts.past > 0, canRedo: counts.future > 0 };
+  const getState = useCallback(() => ({ past: past.current, future: future.current }), []);
+  const load = useCallback((state) => {
+    past.current = state?.past ?? [];
+    future.current = state?.future ?? [];
+    sync();
+  }, [sync]);
+
+  return { push, undo, redo, reset, getState, load, canUndo: counts.past > 0, canRedo: counts.future > 0 };
 }

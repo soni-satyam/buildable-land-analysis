@@ -14,8 +14,8 @@ export default function SegmentHoverTag({ hovered, overrides }) {
       <div className="segment-hover-tag" role="status">
         <span className="segment-swatch" style={{ background: USER_REGION_COLORS[mode] }} />
         <strong>{label}</strong>
-        <span>{Number(hovered.acres ?? 0).toFixed(2)} acres</span>
-        <small>Right-click to {USER_REGION_NEXT_ACTION[mode]}</small>
+        <span className="seg-acres">{Number(hovered.acres ?? 0).toFixed(2)} ac</span>
+        <small>Right-click: {USER_REGION_NEXT_ACTION[mode]}</small>
       </div>
     );
   }
@@ -32,8 +32,8 @@ export default function SegmentHoverTag({ hovered, overrides }) {
     <div className="segment-hover-tag" role="status">
       <span className="segment-swatch" style={{ background: style.color }} />
       <strong>{style.label}</strong>
-      <span>{Number(hovered.acres).toFixed(2)} acres</span>
-      <small>Right-click to {action}</small>
+      <span className="seg-acres">{Number(hovered.acres).toFixed(2)} ac</span>
+      <small>Right-click: {action}</small>
     </div>
   );
 }

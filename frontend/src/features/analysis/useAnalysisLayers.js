@@ -163,7 +163,12 @@ export function useAnalysisLayers(mapRef, ready, { result, overrides = NO_OVERRI
       const key = bounds.flat().map((n) => n.toFixed(6)).join(",");
       if (key === lastFit.current) return;
       lastFit.current = key;
-      mapRef.current.fitBounds(bounds, { padding: 60, duration: 500 });
+      if (skipFitRef?.current) { skipFitRef.current = false; return; } 
+      mapRef.current.fitBounds(bounds, { 
+        padding: { top: 90, bottom: 80, left: 340, right: 400 },
+        maxZoom: 15,   
+        duration: 500 
+    });
     } catch (_) {
       /* ignore fit errors on odd geometries */
     }

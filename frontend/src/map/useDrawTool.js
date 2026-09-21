@@ -22,6 +22,7 @@ export function useDrawTool(mapRef, ready, {
   const confirmMarkerRef = useRef(null);
   const [hasPending, setHasPending] = useState(false);
   const drawnShapesRef = useRef([]);
+  const pendingGeometryRef = useRef(null);
   const cbRef = useRef({});
   cbRef.current = { onAreaSelected, onSubSelect, onExclude, onError, tool };
 
@@ -30,6 +31,7 @@ export function useDrawTool(mapRef, ready, {
     if (map?.getSource("pending-selection")) map.getSource("pending-selection").setData(EMPTY_FEATURE);
     confirmMarkerRef.current?.remove();
     confirmMarkerRef.current = null;
+    pendingGeometryRef.current = null;
     setHasPending(false);
   }
 
@@ -81,6 +83,7 @@ export function useDrawTool(mapRef, ready, {
     if (!map || !geometry) return;
     if (!hasResultRef.current) {
       map.getSource("pending-selection")?.setData({ type: "Feature", geometry, properties: {} });
+      pendingGeometryRef.current = geometry;
       setHasPending(true);
       showConfirmButton(map, geometry);
     } else {
@@ -167,5 +170,5 @@ export function useDrawTool(mapRef, ready, {
     drawRef.current?.clear();
   }
 
-  return { hasPending, resetDraw, submitShape, drawnShapesRef, restoreDrawn };
+  return { hasPending, resetDraw, submitShape, drawnShapesRef, pendingGeometryRef, restoreDrawn };
 }
