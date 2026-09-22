@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
+import { Maximize2, Layers, PieChart } from "lucide-react";
 import HistoryList from "./components/HistoryList.jsx";
 import MapView from "./components/map/Mapdraw.jsx";
 import { LAYER_COLORS, LAYER_LABELS } from "./map/layerColors.js";
@@ -8,28 +9,29 @@ import {
   patchPrefs, archiveSession, loadHistory, removeHistoryEntry, clearHistory,
 } from "./features/persistence/sessionStore.js";
 
-const LAYER_TOGGLES = [
-  { id: "parcel",       label: "Parcel boundary" },
-  { id: "buildable",    label: "Buildable area" },
-  { id: "excluded",     label: "Excluded (constraints)" },
-  { id: "wetlands",     label: "Wetlands" },
-  { id: "fema_flood",   label: "FEMA flood zones" },
-  { id: "buildings",    label: "Building footprints/buffers" },
-  { id: "transmission", label: "Transmission lines" },
-];
+import { CONSTRAINTS, defaultConstraintSettings, mergeConstraintSettings } from "./map/constraints.js";
 
-const SLIDERS = [
-  { key: "wetland_buffer_ft",      label: "Wetland buffer",      min: 0, max: 300, step: 5 },
-  { key: "building_setback_ft",    label: "Building setback",    min: 0, max: 300, step: 5 },
-  { key: "transmission_buffer_ft", label: "Transmission buffer", min: 0, max: 400, step: 10 },
+const LAYER_TOGGLES = [
+  { id: "parcel",    label: "Parcel boundary" },
+  { id: "buildable", label: "Buildable area" },
+  { id: "excluded",  label: "Excluded (constraints)" },
+  ...CONSTRAINTS.map((c) => ({ id: c.id, label: c.label })),
 ];
+const SLIDER_CONSTRAINTS = CONSTRAINTS.filter((c) => c.slider);
+const TOGGLE_CONSTRAINTS = CONSTRAINTS.filter((c) => c.toggle);
+
+// const SLIDERS = [
+//   { key: "wetland_buffer_ft",      label: "Wetland buffer",      min: 0, max: 300, step: 5 },
+//   { key: "building_setback_ft",    label: "Building setback",    min: 0, max: 300, step: 5 },
+//   { key: "transmission_buffer_ft", label: "Transmission buffer", min: 0, max: 400, step: 10 },
+// ];
 
 const PANEL_MIN = 280;
 const PANEL_DEFAULT = 340;
 
 const DEFAULT_SETTINGS = {
-  wetland_buffer_ft: 50, building_setback_ft: 50, transmission_buffer_ft: 100,
-  exclude_sfha: true, restore_brush_ft: 60,
+  constraints: defaultConstraintSettings(),
+  restore_brush_ft: 60,
 };
 
 // Read once at page load. An expired session is moved to History here.
@@ -41,7 +43,11 @@ export default function App() {
   const [error, setError]     = useState(null);
   const [panelW, setPanelW] = useState(() => Math.max(PANEL_MIN, Math.min(620, BOOT.prefs.panelW ?? PANEL_DEFAULT)));
   const [segmentSlot, setSegmentSlot] = useState(null); // portal target for "Land pieces"
-  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS, ...BOOT.prefs.settings });
+  const [settings, setSettings] = useState({
+    ...DEFAULT_SETTINGS,
+    ...BOOT.prefs.settings,
+    constraints: mergeConstraintSettings(BOOT.prefs.settings?.constraints),
+  });
   const [dockOpen, setDockOpen] = useState(BOOT.prefs.dockOpen ?? true);
   const [historyList, setHistoryList] = useState(loadHistory);
   const [restoreRequest, setRestoreRequest] = useState(
@@ -64,7 +70,7 @@ export default function App() {
     const id = ++requestIdRef.current;
     setLoading(true); setError(null);
     try {
-      const data = await analyzeArea({ ...target, ...settings, ...adjustmentRef.current, ...extra });
+      const data = await analyzeArea({ ...target, constraint_settings: settings.constraints, ...adjustmentRef.current, ...extra });
       if (id !== requestIdRef.current) return;
       setResult(data);
     } catch (e) {
@@ -102,14 +108,16 @@ export default function App() {
     selectionRef.current = null; adjustmentRef.current = {};
     setResult(null); setError(null);
   }
-  function updateSetting(key, value) {
-    setSettings((s) => ({ ...s, [key]: value }));
+  function updateConstraint(id, patch) {
+    const next = { ...settings.constraints, [id]: { ...settings.constraints[id], ...patch } };
+    setSettings((s) => ({ ...s, constraints: next }));
     if (!selectionRef.current) return;
     clearTimeout(analyzeTimerRef.current);
     analyzeTimerRef.current = setTimeout(() => {
-      runAnalyze(selectionRef.current, { [key]: value });
+      runAnalyze(selectionRef.current, { constraint_settings: next });
     }, 300);
   }
+
   function toggleLayer(id) {
     setLayerVisibility((v) => ({ ...v, [id]: !v[id] }));
   }
@@ -201,23 +209,25 @@ export default function App() {
           <div className="rp-section">
             <p className="rp-section-label">Setbacks</p>
 
-            {SLIDERS.map(({ key, label, min, max, step }) => (
-              <div className="rp-slider-row" key={key}>
+            {SLIDER_CONSTRAINTS.map(({ id, slider }) => (
+              <div className="rp-slider-row" key={id}>
                 <div className="rp-slider-head">
-                  <span>{label}</span>
-                  <span className="rp-slider-val">{settings[key]} ft</span>
+                  <span>{slider.label}</span>
+                  <span className="rp-slider-val">{settings.constraints[id].buffer_ft} ft</span>
                 </div>
-                <input type="range" min={min} max={max} step={step}
-                  value={settings[key]}
-                  onChange={(e) => updateSetting(key, Number(e.target.value))} />
+                <input type="range" min={slider.min} max={slider.max} step={slider.step}
+                  value={settings.constraints[id].buffer_ft}
+                  onChange={(e) => updateConstraint(id, { buffer_ft: Number(e.target.value) })} />
               </div>
             ))}
 
-            <label className="rp-checkbox">
-              <input type="checkbox" checked={settings.exclude_sfha}
-                onChange={(e) => updateSetting("exclude_sfha", e.target.checked)} />
-              Exclude FEMA flood zones
-            </label>
+            {TOGGLE_CONSTRAINTS.map(({ id, toggle }) => (
+              <label className="rp-checkbox" key={id}>
+                <input type="checkbox" checked={settings.constraints[id].enabled}
+                  onChange={(e) => updateConstraint(id, { enabled: e.target.checked })} />
+                {toggle.label}
+              </label>
+            ))}
 
             <div className="rp-slider-row" style={{ marginTop: 12 }}>
               <div className="rp-slider-head">
@@ -288,23 +298,23 @@ export default function App() {
             <>
               <div className="rp-section rp-stats-section">
                 <div className="rp-stats">
-                  <div className="rp-stat">
-                    <span className="rp-stat-icon">⬡</span>
-                    <span className="rp-stat-label">Selected</span>
-                    <span className="rp-stat-val">{result.parcel_acres} <em>ac</em></span>
-                  </div>
-                  <div className="rp-stat">
-                    <span className="rp-stat-icon" style={{ color: "var(--buildable)" }}>◼</span>
-                    <span className="rp-stat-label">Buildable</span>
-                    <span className="rp-stat-val" style={{ color: "var(--buildable)" }}>{result.buildable_acres} <em>ac</em></span>
-                  </div>
-                  <div className="rp-stat">
-                    <span className="rp-stat-icon rp-ratio-icon">◔</span>
-                    <span className="rp-stat-label">Ratio</span>
-                    <span className="rp-stat-val rp-ratio-val">{buildableRatio.toFixed(1)}%</span>
-                  </div>
+                <div className="rp-stat">
+                  <Maximize2 size={20} className="rp-stat-svg" />
+                  <span className="rp-stat-label">Selected area</span>
+                  <span className="rp-stat-val">{result.parcel_acres} <em>ac</em></span>
+                </div>
+                <div className="rp-stat">
+                  <Layers size={20} className="rp-stat-svg" style={{ color: "var(--buildable)" }} />
+                  <span className="rp-stat-label">Buildable land</span>
+                  <span className="rp-stat-val" style={{ color: "var(--buildable)" }}>{result.buildable_acres} <em>ac</em></span>
+                </div>
+                <div className="rp-stat">
+                  <PieChart size={20} className="rp-stat-svg rp-ratio-icon" />
+                  <span className="rp-stat-label">Buildable ratio</span>
+                  <span className="rp-stat-val rp-ratio-val">{buildableRatio.toFixed(1)}%</span>
                 </div>
               </div>
+                            </div>
 
               {result.breakdown?.length > 0 && (
                 <div className="rp-section">
@@ -356,13 +366,11 @@ export default function App() {
           )}  
         </div>
               {/* Centre-of-map loader: first calculation / restore only */}
+          {/* Analysis-panel loader: first calculation / restore only */}
           {loading && !result && (
-            <div className="map-loading" role="status" aria-live="polite">
-              <div className="map-loading-card">
-                <div className="ring" />
-                <p className="map-loading-title">Analysing land…</p>
-                <p className="map-loading-sub">Checking wetlands, flood zones and buildings</p>
-              </div>
+            <div className="panel-loading" role="status" aria-live="polite">
+              <div className="dots" aria-hidden="true"><span /><span /><span /></div>
+              <p>Loading Analysis…</p>
             </div>
           )}
         </div>

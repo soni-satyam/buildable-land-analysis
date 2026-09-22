@@ -204,193 +204,43 @@ def compute_buildable_area(
     per_layer_exclusions: list[base.BaseGeometry] = []
     segments: dict[str, list] = {}
 
-    # ---------------------------------------------------------
-    # Wetlands
-    # ---------------------------------------------------------
+    for layer_id, cfg in setback_cfg.items():
 
-    if "wetlands" in constraint_layers:
+        if layer_id not in constraint_layers:
+            continue
+        if not cfg.get("enabled", True):
+            continue
 
-        cfg = setback_cfg.get("wetlands", {})
         buffer_ft = float(cfg.get("buffer_ft", 0) or 0)
 
-        layer = _to_area_crs(
-            constraint_layers["wetlands"],
-            area_crs,
-        )
+        layer = _to_area_crs(constraint_layers[layer_id], area_crs)
 
-        layer = _buffer_ft(
-            layer,
-            buffer_ft,
-        )
+        flt = cfg.get("filter")
+        if flt and flt.get("column") in layer.columns:
+            layer = layer[
+                layer[flt["column"]].astype(str).str.upper()
+                == str(flt.get("equals", "")).upper()
+            ]
 
+        layer = _buffer_ft(layer, buffer_ft)
         union_geom = _safe_union(layer.geometry)
-
-        clipped = (
-            union_geom.intersection(parcel_geom)
-            if union_geom is not None
-            else None
-        )
-
-        acres = _area_acres(
-            clipped,
-            crs_units_are_feet,
-        )
+        clipped = union_geom.intersection(parcel_geom) if union_geom is not None else None
+        acres = _area_acres(clipped, crs_units_are_feet)
 
         breakdown.append(
             LayerResult(
-                layer="wetlands",
+                layer=layer_id,
                 acres_removed=round(acres, 2),
                 buffer_ft=buffer_ft,
-                reason="Wetland buffer",
-                geometry=clipped
+                reason=cfg.get("reason") or layer_id.replace("_", " ").title(),
+                geometry=clipped,
             )
         )
 
         if clipped is not None and not clipped.is_empty:
             per_layer_exclusions.append(clipped)
-        
-        segments["wetlands"] = _explode_segments(clipped) 
 
-    # ---------------------------------------------------------
-    # FEMA
-    # ---------------------------------------------------------
-
-    if "fema" in constraint_layers:
-
-        cfg = setback_cfg.get("fema", {})
-
-        if cfg.get("exclude_sfha", True):
-
-            fema_gdf = _to_area_crs(
-                constraint_layers["fema"],
-                area_crs,
-            )
-
-            if "SFHA_TF" in fema_gdf.columns:
-                fema_gdf = fema_gdf[
-                    fema_gdf["SFHA_TF"].astype(str).str.upper() == "T"
-                ]
-
-            union_geom = _safe_union(fema_gdf.geometry)
-
-            clipped = (
-                union_geom.intersection(parcel_geom)
-                if union_geom is not None
-                else None
-            )
-
-            acres = _area_acres(
-                clipped,
-                crs_units_are_feet,
-            )
-
-            breakdown.append(
-                LayerResult(
-                    layer="fema_flood",
-                    acres_removed=round(acres, 2),
-                    buffer_ft=0,
-                    reason= "Flood zone",
-                    geometry=clipped
-                )
-            )
-
-            if clipped is not None and not clipped.is_empty:
-                per_layer_exclusions.append(clipped)
-
-            segments["fema_flood"] = _explode_segments(clipped) 
-    # ---------------------------------------------------------
-    # Buildings
-    # ---------------------------------------------------------
-
-    if "buildings" in constraint_layers:
-
-        cfg = setback_cfg.get("buildings", {})
-        buffer_ft = float(cfg.get("buffer_ft", 0) or 0)
-
-        layer = _to_area_crs(
-            constraint_layers["buildings"],
-            area_crs,
-        )
-
-        layer = _buffer_ft(
-            layer,
-            buffer_ft,
-        )
-
-        union_geom = _safe_union(layer.geometry)
-
-        clipped = (
-            union_geom.intersection(parcel_geom)
-            if union_geom is not None
-            else None
-        )
-
-        acres = _area_acres(
-            clipped,
-            crs_units_are_feet,
-        )
-
-        breakdown.append(
-            LayerResult(
-                layer="buildings",
-                acres_removed=round(acres, 2),
-                buffer_ft=buffer_ft,
-                reason="Building setback",
-                geometry=clipped
-            )
-        )
-
-        if clipped is not None and not clipped.is_empty:
-            per_layer_exclusions.append(clipped)
-        
-        segments["buildings"] = _explode_segments(clipped)
-
-    # ---------------------------------------------------------
-    # Transmission
-    # ---------------------------------------------------------
-
-    if "transmission" in constraint_layers:
-
-        cfg = setback_cfg.get("transmission", {})
-        buffer_ft = float(cfg.get("buffer_ft", 0) or 0)
-
-        layer = _to_area_crs(
-            constraint_layers["transmission"],
-            area_crs,
-        )
-
-        layer = _buffer_ft(
-            layer,
-            buffer_ft,
-        )
-
-        union_geom = _safe_union(layer.geometry)
-
-        clipped = (
-            union_geom.intersection(parcel_geom)
-            if union_geom is not None
-            else None
-        )
-
-        acres = _area_acres(
-            clipped,
-            crs_units_are_feet,
-        )
-
-        breakdown.append(
-            LayerResult(
-                layer="transmission",
-                acres_removed=round(acres, 2),
-                buffer_ft=buffer_ft,
-                reason="Power line buffer",
-                geometry=clipped
-            )
-        )
-
-        if clipped is not None and not clipped.is_empty:
-            per_layer_exclusions.append(clipped)
-        
-        segments["transmission"] = _explode_segments(clipped)
+        segments[layer_id] = _explode_segments(clipped)
 
     # ---------------------------------------------------------
     # Manual exclusions

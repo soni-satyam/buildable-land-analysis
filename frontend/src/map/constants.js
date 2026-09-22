@@ -1,3 +1,5 @@
+import { CONSTRAINT_IDS } from "./constraints.js"
+
 export const HARRIS_COUNTY_BOUNDS = [
   [-95.960733, 29.497297],
   [-94.908492, 30.170606],
@@ -43,12 +45,8 @@ export const BASEMAPS = {
 
 // Which result-driven layers get rendered/toggled, and in what order
 // (later = drawn on top).
-export const ANALYSIS_LAYER_IDS = ["parcel", "buildable", "excluded", "wetlands", "fema_flood", "buildings", "transmission"];
-
-// Layers that come segmented into individually clickable pieces (see the
-// backend's `segments` field). Right-click on one of these toggles that
-// exact piece; right-click elsewhere falls back to the brush circle.
-export const SEGMENT_LAYER_KEYS = ["wetlands", "fema_flood", "buildings", "transmission", "buildable"];
+export const ANALYSIS_LAYER_IDS = ["parcel", "buildable", "excluded", ...CONSTRAINT_IDS];
+export const SEGMENT_LAYER_KEYS = [...CONSTRAINT_IDS, "buildable"];
 export const SEGMENT_FILL_LAYER_IDS = SEGMENT_LAYER_KEYS.map((k) => `${k}-segments-fill`);
 
 export const EMPTY_FEATURE = { type: "Feature", geometry: { type: "GeometryCollection", geometries: [] }, properties: {} };

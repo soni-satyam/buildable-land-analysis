@@ -10,48 +10,59 @@ paths:
     id_field: "Prop_ID"          # application-facing parcel identifier
     source_crs: "EPSG:4326"
 
-  wetlands:
-    file: "data/wetlands/harris_wetlands.gpkg"
-    layer: "harris_wetlands"
-    source_crs: "EPSG:5070"
-
-  fema:
-    file: "data/fema/harris_fema_flood_hazards.gpkg"   # cleaned/repaired, not the raw ZIP
-    layer: "flood_hazard_areas"
-    source_crs: "EPSG:4269"
-
-  buildings:
-    file: "data/buildings/LiDAR_Building_Footprints_2018.gdb"
-    layer: "LiDAR_Building_Footprints_2018"
-    source_crs: "EPSG:2278"
-
-  transmission:
-    file: "data/transmission/harris_transmission_lines.gpkg"
-    layer: "harris_transmission_lines"
-    source_crs: "EPSG:3857"
-
   county_boundary:
     file: "data/counties/tl_2025_us_county.zip"
     fips_field: "GEOID"
     fips_value: "48201"
     source_crs: "EPSG:4269"
 
-setbacks:
+# ── Constraint layers ────────────────────────────────────────────────
+# Every entry here is analysed automatically (loaded, buffered, clipped,
+# listed in the breakdown, segmented). To add a constraint, add a block
+# below and a matching entry in frontend/src/map/constraints.js.
+#
+#   file / layer / source_crs   the data source
+#   buffer_ft                   default buffer around the features (feet)
+#   enabled                     false = skipped unless a request turns it on
+#   reason                      label used in the breakdown
+#   filter                      optional {column, equals}: keep matching rows only
+#   source                      documentation of where the assumption comes from
+#
+# The key (e.g. `wetlands`) is the constraint id used everywhere: request
+# overrides, breakdown rows, map layers and frontend colours.
+constraints:
   wetlands:
+    file: "data/wetlands/harris_wetlands.gpkg"
+    layer: "harris_wetlands"
+    source_crs: "EPSG:5070"
     buffer_ft: 50
+    reason: "Wetland buffer"
     source: "Screening default; not a codified Texas/Harris County wetland buffer. Configurable."
 
-  fema:
-    exclude_sfha: true          # whether SFHA_TF == 'T' zones are treated as exclusions at all
+  fema_flood:
+    file: "data/fema/harris_fema_flood_hazards.gpkg"   # cleaned/repaired, not the raw ZIP
+    layer: "flood_hazard_areas"
+    source_crs: "EPSG:4269"
     buffer_ft: 0                # no additional buffer beyond the mapped flood hazard polygon
+    enabled: true
+    reason: "Flood zone"
+    filter: { column: "SFHA_TF", equals: "T" }
     source: "FEMA NFHL SFHA flag (SFHA_TF == 'T'); Zone X not treated as high-risk exclusion."
 
   buildings:
+    file: "data/buildings/LiDAR_Building_Footprints_2018.gdb"
+    layer: "LiDAR_Building_Footprints_2018"
+    source_crs: "EPSG:2278"
     buffer_ft: 50
+    reason: "Building setback"
     source: "Screening default setback around 2018 LiDAR footprints; not a local building-code setback."
 
   transmission:
+    file: "data/transmission/harris_transmission_lines.gpkg"
+    layer: "harris_transmission_lines"
+    source_crs: "EPSG:3857"
     buffer_ft: 100
+    reason: "Power line buffer"
     source: "Screening default; actual utility easement widths vary by voltage/owner. Configurable."
 
 # CRS used for all area math and buffering. Chosen as a proper Texas

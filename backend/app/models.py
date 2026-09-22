@@ -40,6 +40,11 @@ class BuildableAreaResponse(BaseModel):
     buildable_geometry: GeoJSONGeometry
     excluded_geometry: GeoJSONGeometry
 
+class ConstraintSetting(BaseModel):
+    buffer_ft: Optional[float] = Field(default=None, ge=0)   # also rejects negative buffers
+    enabled: Optional[bool] = None
+
+
 class AnalyzeRequest(BaseModel):
     # Either an existing parcel's Prop_ID, OR a freehand-drawn polygon
     # (custom_geometry, in EPSG:4326) can be analyzed. Exactly one should
@@ -47,11 +52,7 @@ class AnalyzeRequest(BaseModel):
     parcel_id: Optional[str] = None
     custom_geometry: Optional[GeoJSONGeometry] = None
 
-    wetland_buffer_ft: Optional[float] = None
-    building_setback_ft: Optional[float] = None
-    transmission_buffer_ft: Optional[float] = None
-
-    exclude_sfha: Optional[bool] = None
+    constraint_settings: dict[str, ConstraintSetting] = Field(default_factory=dict)
 
     user_exclusions: list[ManualAdjustment] = Field(
         default_factory=list

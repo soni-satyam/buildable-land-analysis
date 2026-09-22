@@ -185,7 +185,10 @@ body {
   gap: 4px;
   min-width: 0;
 }
-.rp-stat-icon { font-size: 18px; color: var(--txt-2); line-height: 1; }
+.rp-stat-svg {
+  color: var(--txt-3);
+  flex-shrink: 0;
+}
 .rp-ratio-icon { color: var(--accent); }
 .rp-stat-label { font-size: 10px; color: var(--txt-2); line-height: 1.3; }
 .rp-stat-val {
@@ -916,10 +919,11 @@ input[type="range"]::-moz-range-thumb {
 
 .dots { display: flex; gap: 8px; }
 .dots span {
-  width: 12px; height: 12px;
+  width: 13px; height: 13px;
   background: var(--accent);
   border-radius: 50%;
   animation: bounce 1s ease-in-out infinite;
+  box-shadow: 0 0 10px rgba(201, 154, 70, 0.45);
 }
 .dots span:nth-child(2) { animation-delay: 0.15s; }
 .dots span:nth-child(3) { animation-delay: 0.30s; }

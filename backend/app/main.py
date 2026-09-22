@@ -233,53 +233,25 @@ def analyze(req: AnalyzeRequest):
     # nearby constraint features aren't missed. ~0.01 deg is roughly 1km;
     # generous enough to cover a few hundred feet of buffer with margin.
     setback_cfg = {
-        k: dict(v)
-        for k, v in CONFIG.get("setbacks", {}).items()
+        cid: {
+            "buffer_ft": c.get("buffer_ft", 0),
+            "enabled": c.get("enabled", True),
+            "reason": c.get("reason"),
+            "filter": c.get("filter"),
+        }
+        for cid, c in CONFIG.get("constraints", {}).items()
     }
-    
-    if req.wetland_buffer_ft is not None:
-        setback_cfg.setdefault("wetlands", {})["buffer_ft"] = req.wetland_buffer_ft
-    if req.building_setback_ft is not None:
-        setback_cfg.setdefault("buildings", {})["buffer_ft"] = req.building_setback_ft
-    if req.transmission_buffer_ft is not None:
-        setback_cfg.setdefault("transmission", {})["buffer_ft"] = req.transmission_buffer_ft
-    if req.exclude_sfha is not None:
-        setback_cfg.setdefault("fema", {})["exclude_sfha"] = req.exclude_sfha
 
-      # ---------------------------------------------------------
-    # Determine largest requested buffer
-    #
-    # This controls how far beyond the parcel we query for
-    # nearby constraint features.
-    #
-    # IMPORTANT:
-    # This is only for finding nearby features.
-    # Actual buffering is performed in EPSG:2278 inside
-    # compute_buildable_area().
-    # ---------------------------------------------------------
-    buffer_values = [
-        float(
-            setback_cfg
-            .get("wetlands", {})
-            .get("buffer_ft", 0)
-            or 0
-        ),
-        float(
-            setback_cfg
-            .get("buildings", {})
-            .get("buffer_ft", 0)
-            or 0
-        ),
-        float(
-            setback_cfg
-            .get("transmission", {})
-            .get("buffer_ft", 0)
-            or 0
-        ),
-    ]
+    for cid, s in req.constraint_settings.items():
+        if cid not in setback_cfg:
+            continue                      # ignore unknown ids
+        if s.buffer_ft is not None:
+            setback_cfg[cid]["buffer_ft"] = s.buffer_ft
+        if s.enabled is not None:
+            setback_cfg[cid]["enabled"] = s.enabled
 
     max_buffer_ft = max(
-        buffer_values,
+        (float(c.get("buffer_ft", 0) or 0) for c in setback_cfg.values() if c.get("enabled", True)),
         default=0.0,
     )
 
@@ -365,7 +337,7 @@ def analyze(req: AnalyzeRequest):
     # and toggle each independently rather than only the combined
     # "excluded" shape. Manual exclusions have no `.geometry` set and are
     # skipped here - they're already part of `excluded`.
-    CONSTRAINT_LAYER_KEYS = {"wetlands", "fema_flood", "buildings", "transmission"}
+    CONSTRAINT_LAYER_KEYS = set(setback_cfg)
     layers_wgs84: dict = {}
     for b in breakdown:
         if b.layer in CONSTRAINT_LAYER_KEYS and b.geometry is not None and not b.geometry.is_empty:

@@ -62,7 +62,7 @@ export default function MapView({
   const parcelGeometryRef = useRef(null);
   parcelGeometryRef.current = result?.geometry?.parcel ?? null;
 
-  const [tool, setTool] = useState(initial?.prefs?.tool ?? "pan");
+  const [tool, setTool] = useState("pan");
   const [brushColor, setBrushColor] = useState(initial?.prefs?.brushColor ?? "#ffd60a");
   const presenting = tool === "laser" || tool === "brush";
 

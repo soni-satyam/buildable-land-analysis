@@ -189,7 +189,7 @@ def _load_layer_near(
     bbox_wgs84: tuple,
 ) -> gpd.GeoDataFrame:
 
-    cfg = config["paths"].get(layer_key)
+    cfg = config.get("constraints", {}).get(layer_key) or config["paths"].get(layer_key)
 
     if not cfg:
         return gpd.GeoDataFrame(
@@ -284,12 +284,7 @@ def load_constraint_layers_near(
 
     layers = {}
 
-    for key in (
-        "wetlands",
-        "fema",
-        "buildings",
-        "transmission",
-    ):
+    for key in config.get("constraints", {}):
 
         gdf = _load_layer_near(
             key,
