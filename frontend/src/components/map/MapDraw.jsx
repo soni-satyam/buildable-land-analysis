@@ -174,6 +174,7 @@ export default function MapView({
       resetAdjustments();
       historyRef.current.reset();
       skipFitRef.current = false;
+      setTool("pan");
       onAreaSelected?.(geometry);
     },
 

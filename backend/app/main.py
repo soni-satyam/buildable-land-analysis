@@ -238,6 +238,7 @@ def analyze(req: AnalyzeRequest):
             "enabled": c.get("enabled", True),
             "reason": c.get("reason"),
             "filter": c.get("filter"),
+            "mode": c.get("mode", "exclude"),
         }
         for cid, c in CONFIG.get("constraints", {}).items()
     }

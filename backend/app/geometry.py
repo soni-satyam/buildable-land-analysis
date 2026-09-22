@@ -203,9 +203,48 @@ def compute_buildable_area(
     breakdown: list[LayerResult] = []
     per_layer_exclusions: list[base.BaseGeometry] = []
     segments: dict[str, list] = {}
+    
+    candidate_geom = parcel_geom
+
+    for layer_id, cfg in setback_cfg.items():
+        if cfg.get("mode") != "intersect":
+            continue
+        if layer_id not in constraint_layers:
+            continue
+        if not cfg.get("enabled", True):
+            continue
+
+        layer = _to_area_crs(constraint_layers[layer_id], area_crs)
+        union_geom = _safe_union(layer.geometry)
+        if union_geom is None:
+            continue
+
+        eligible = candidate_geom.intersection(union_geom)
+        eligible = _make_valid_geom(eligible)
+        ineligible = candidate_geom.difference(union_geom)
+        ineligible = _make_valid_geom(ineligible)
+
+        acres_lost = _area_acres(ineligible, crs_units_are_feet)
+        breakdown.append(
+            LayerResult(
+                layer=layer_id,
+                acres_removed=round(acres_lost, 2),
+                buffer_ft=0,
+                reason=cfg.get("reason") or "Eligibility filter",
+                geometry=ineligible,
+            )
+        )
+        segments[layer_id] = _explode_segments(ineligible)
+
+        if eligible is None or eligible.is_empty:
+            candidate_geom = parcel_geom.__class__()  # empty geometry
+        else:
+            candidate_geom = eligible
 
     for layer_id, cfg in setback_cfg.items():
 
+        if cfg.get("mode") == "intersect":
+            continue                          # already handled above
         if layer_id not in constraint_layers:
             continue
         if not cfg.get("enabled", True):
@@ -217,14 +256,16 @@ def compute_buildable_area(
 
         flt = cfg.get("filter")
         if flt and flt.get("column") in layer.columns:
-            layer = layer[
-                layer[flt["column"]].astype(str).str.upper()
-                == str(flt.get("equals", "")).upper()
-            ]
+            col = layer[flt["column"]].astype(str).str.upper()
+            if "isin" in flt:
+                values = {str(v).upper() for v in flt["isin"]}
+                layer = layer[col.isin(values)]
+            elif "equals" in flt:
+                layer = layer[col == str(flt["equals"]).upper()]
 
         layer = _buffer_ft(layer, buffer_ft)
         union_geom = _safe_union(layer.geometry)
-        clipped = union_geom.intersection(parcel_geom) if union_geom is not None else None
+        clipped = union_geom.intersection(candidate_geom) if union_geom is not None else None
         acres = _area_acres(clipped, crs_units_are_feet)
 
         breakdown.append(
@@ -247,9 +288,9 @@ def compute_buildable_area(
     # ---------------------------------------------------------
     natural_excluded_geom = _safe_union(per_layer_exclusions)
     natural_buildable_geom = (
-        parcel_geom.difference(natural_excluded_geom)
+        candidate_geom.difference(natural_excluded_geom)
         if natural_excluded_geom is not None
-        else parcel_geom
+        else candidate_geom
     )
     natural_buildable_geom = _make_valid_geom(natural_buildable_geom)
     segments["buildable"] = _explode_segments(natural_buildable_geom)
@@ -263,7 +304,7 @@ def compute_buildable_area(
         if geom is None or geom.is_empty:
             continue
 
-        clipped = geom.intersection(parcel_geom)
+        clipped = geom.intersection(candidate_geom)
 
         if clipped is None or clipped.is_empty:
             continue
@@ -320,7 +361,7 @@ def compute_buildable_area(
                 continue
 
             restore_clipped = geom.intersection(
-                parcel_geom
+                candidate_geom
             )
 
             if restore_clipped is None or restore_clipped.is_empty:
@@ -343,11 +384,9 @@ def compute_buildable_area(
     # ---------------------------------------------------------
 
     if excluded_geom is None:
-        buildable_geom = parcel_geom
+        buildable_geom = candidate_geom
     else:
-        buildable_geom = parcel_geom.difference(
-            excluded_geom
-        )
+        buildable_geom = candidate_geom.difference(excluded_geom)
 
         buildable_geom = _make_valid_geom(
             buildable_geom
