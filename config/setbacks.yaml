@@ -6,7 +6,7 @@ paths:
     source_crs: "EPSG:4326"
 
   county_boundary:
-    file: "data/counties/tl_2025_us_county.zip"
+    file: "data/counties/tl_2025_us_county.shp"
     fips_field: "GEOID"
     fips_value: "48201"
     source_crs: "EPSG:4269"
